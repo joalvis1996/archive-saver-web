@@ -33,6 +33,12 @@ def get_dropbox_client():
         oauth2_refresh_token=DROPBOX_REFRESH_TOKEN
     )
 
+# Dropbox에서 파일의 임시 링크를 가져오는 함수 추가
+def get_temporary_link(dropbox_path):
+    dbx = get_dropbox_client()
+    link = dbx.files_get_temporary_link(dropbox_path).link
+    return link
+
 @app.route("/api/collections", methods=["GET"])
 def get_collections():
     try:
@@ -72,8 +78,8 @@ def save_page():
         with open(filepath, "rb") as f:
             dbx.files_upload(f.read(), dropbox_path, mode=dropbox.files.WriteMode.overwrite)
 
-        shared_url = dbx.sharing_create_shared_link_with_settings(dropbox_path).url
-        shared_url = shared_url.replace("?dl=0", "?raw=1")
+        # 임시 다운로드 링크를 가져오기
+        shared_url = get_temporary_link(dropbox_path)
 
         title = soup.title.string.strip() if soup.title else "Untitled"
         domain_tag = parsed.netloc
@@ -84,7 +90,7 @@ def save_page():
             "Content-Type": "application/json"
         }
         payload = {
-            "link": shared_url,
+            "link": shared_url,  # 임시 다운로드 링크 사용
             "title": title,
             "excerpt": url,
             "tags": [domain_tag],
@@ -95,9 +101,9 @@ def save_page():
 
         r = requests.post("https://api.raindrop.io/rest/v1/raindrop", headers=headers, json=payload)
         if r.status_code == 200:
-            return jsonify({"message": "Raindrop 저장 완료!"})
+            return jsonify({"message": "저장 완료!"})
         else:
-            return jsonify({"error": f"Raindrop 저장 실패: {r.status_code}"}), 500
+            return jsonify({"error": f"저장 실패: {r.status_code}"}), 500
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
