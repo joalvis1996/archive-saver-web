@@ -45,6 +45,12 @@ def get_collections():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+def get_preview_link(dropbox_path):
+    dbx = get_dropbox_client()
+    shared_link_metadata = dbx.sharing_create_shared_link_with_settings(dropbox_path)
+    url = shared_link_metadata.url
+    return url.replace("?dl=0", "?raw=1")
+
 @app.route("/api/save", methods=["POST"])
 def save_page():
     data = request.json
@@ -82,7 +88,7 @@ def save_page():
         with open(filepath, "rb") as f:
             dbx.files_upload(f.read(), dropbox_path, mode=dropbox.files.WriteMode.overwrite)
 
-        shared_url = get_temporary_link(dropbox_path)
+        shared_url = get_preview_link(dropbox_path)
 
         title = soup.title.string.strip() if soup.title else "Untitled"
         domain_tag = parsed.netloc
