@@ -60,7 +60,8 @@ def save_page():
         return jsonify({"error": "Missing url or collectionId"}), 400
 
     try:
-        url = unquote(original_url)
+        # ✅ 모바일에서 인코딩된 URL은 이중 디코딩 필요
+        url = unquote(unquote(original_url))
         parsed = urlparse(url)
 
         # 안전한 파일 이름 생성
@@ -69,7 +70,7 @@ def save_page():
         filename = quote(safe_path, safe='') + ".html"
         filepath = f"/tmp/{filename}"
 
-        # 📌 데스크탑 User-Agent 추가
+        # 📌 데스크탑 User-Agent로 요청
         headers = {
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
