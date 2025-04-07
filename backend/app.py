@@ -55,37 +55,41 @@ def save_page():
         return jsonify({"error": "Missing url or collectionId"}), 400
 
     try:
-        # 🧼 1. 모바일에서 들어온 이중 인코딩 URL을 디코딩
-    # URL 이중 디코딩 처리
-        url = unquote(unquote(original_url))
-        parsed = urlparse(url)
+        # ✅ 필요할 경우 한 번만 디코딩 (불필요한 중복 제거)
+        decoded_url = unquote(original_url)
+        parsed = urlparse(decoded_url)
 
-        res = requests.get(url)
+        # ✅ HTML 다운로드
+        res = requests.get(decoded_url)
         soup = BeautifulSoup(res.text, "html.parser")
 
         for tag, attr in {"img": "src", "script": "src", "link": "href"}.items():
             for node in soup.find_all(tag):
                 if node.has_attr(attr):
-                    node[attr] = urljoin(url, node[attr])
+                    node[attr] = urljoin(decoded_url, node[attr])
 
-        # 📝 2. 안전한 파일명 생성 (이중 인코딩 방지)
-        raw_path = parsed.netloc + parsed.path + ('?' + parsed.query if parsed.query else '')
-        filename = quote_plus(unquote(raw_path)) + ".html"  # 이중 인코딩 방지
-        filepath = f"/tmp/{filename}"
+        # ✅ 파일 이름은 디코딩된 경로로 만들고, 그걸 quote 처리
+        raw_path = parsed.netloc + parsed.path + (f"?{parsed.query}" if parsed.query else "")
+        safe_filename = quote(raw_path, safe='') + ".html"
+        filepath = f"/tmp/{safe_filename}"
 
+        # ✅ 파일 저장
         with open(filepath, "w", encoding="utf-8") as f:
             f.write(str(soup))
 
+        # ✅ Dropbox 업로드
         dbx = get_dropbox_client()
-        dropbox_path = f"/web-archives/{filename}"
+        dropbox_path = f"/web-archives/{safe_filename}"
         with open(filepath, "rb") as f:
             dbx.files_upload(f.read(), dropbox_path, mode=dropbox.files.WriteMode.overwrite)
 
+        # ✅ Dropbox 링크 생성
         shared_url = get_temporary_link(dropbox_path)
 
+        # ✅ Raindrop 저장
         title = soup.title.string.strip() if soup.title else "Untitled"
         domain_tag = parsed.netloc
-        cover_image_url = extract_cover_image(soup, url)
+        cover_image_url = extract_cover_image(soup, decoded_url)
 
         headers = {
             "Authorization": f"Bearer {RAINDROP_ACCESS_TOKEN}",
@@ -94,7 +98,7 @@ def save_page():
         payload = {
             "link": shared_url,
             "title": title,
-            "excerpt": url,
+            "excerpt": decoded_url,
             "tags": [domain_tag],
             "collection": {"$id": collection_id}
         }
