@@ -2,7 +2,7 @@ from flask import Flask, request, jsonify, send_from_directory
 import requests
 import dropbox
 from bs4 import BeautifulSoup
-from urllib.parse import urlparse, urljoin, quote, unquote
+from urllib.parse import urlparse, urljoin, unquote, quote_plus
 import os
 
 app = Flask(__name__, static_folder="../frontend/dist", static_url_path="/")
@@ -55,7 +55,7 @@ def save_page():
         return jsonify({"error": "Missing url or collectionId"}), 400
 
     try:
-        # 1️⃣ URL 디코딩 먼저 수행
+        # 🧼 1. 모바일에서 들어온 이중 인코딩 URL을 디코딩
         url = unquote(original_url)
         parsed = urlparse(url)
 
@@ -67,9 +67,9 @@ def save_page():
                 if node.has_attr(attr):
                     node[attr] = urljoin(url, node[attr])
 
-        # 2️⃣ 안전한 파일 이름 생성
-        safe_url = parsed.netloc + parsed.path + ('?' + parsed.query if parsed.query else '')
-        filename = quote(safe_url, safe='') + ".html"
+        # 📝 2. 안전한 파일명 생성 (이중 인코딩 방지)
+        raw_path = parsed.netloc + parsed.path + ('?' + parsed.query if parsed.query else '')
+        filename = quote_plus(unquote(raw_path)) + ".html"  # 이중 인코딩 방지
         filepath = f"/tmp/{filename}"
 
         with open(filepath, "w", encoding="utf-8") as f:
