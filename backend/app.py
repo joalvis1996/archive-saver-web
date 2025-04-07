@@ -59,6 +59,11 @@ def save_page():
         url = unquote(original_url)
         parsed = urlparse(url)
 
+        # safe_url을 미리 디코딩한 후, 다시 필요한 만큼만 인코딩
+        raw_path = parsed.netloc + parsed.path + ('?' + parsed.query if parsed.query else '')
+        decoded_path = unquote(raw_path)  # 먼저 풀어주기
+        filename = quote(decoded_path, safe='') + ".html"  # 다시 안전하게 인코딩
+
         res = requests.get(url)
         soup = BeautifulSoup(res.text, "html.parser")
 
@@ -67,9 +72,6 @@ def save_page():
                 if node.has_attr(attr):
                     node[attr] = urljoin(url, node[attr])
 
-        # 2️⃣ 안전한 파일 이름 생성
-        safe_url = parsed.netloc + parsed.path + ('?' + parsed.query if parsed.query else '')
-        filename = quote(safe_url, safe='') + ".html"
         filepath = f"/tmp/{filename}"
 
         with open(filepath, "w", encoding="utf-8") as f:
