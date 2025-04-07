@@ -12,6 +12,7 @@ APP_KEY = os.getenv("DROPBOX_APP_KEY")
 APP_SECRET = os.getenv("DROPBOX_APP_SECRET")
 RAINDROP_ACCESS_TOKEN = os.getenv("RAINDROP_ACCESS_TOKEN")
 
+
 def extract_cover_image(soup, base_url):
     og = soup.find("meta", property="og:image")
     if og and og.get("content"):
@@ -24,6 +25,7 @@ def extract_cover_image(soup, base_url):
         return urljoin(base_url, link["href"])
     return None
 
+
 def get_dropbox_client():
     return dropbox.Dropbox(
         app_key=APP_KEY,
@@ -31,10 +33,12 @@ def get_dropbox_client():
         oauth2_refresh_token=DROPBOX_REFRESH_TOKEN
     )
 
+
 def get_temporary_link(dropbox_path):
     dbx = get_dropbox_client()
     link = dbx.files_get_temporary_link(dropbox_path).link
     return link
+
 
 @app.route("/api/collections", methods=["GET"])
 def get_collections():
@@ -45,11 +49,6 @@ def get_collections():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-def get_preview_link(dropbox_path):
-    dbx = get_dropbox_client()
-    shared_link_metadata = dbx.sharing_create_shared_link_with_settings(dropbox_path)
-    url = shared_link_metadata.url
-    return url.replace("?dl=0", "?raw=1")
 
 @app.route("/api/save", methods=["POST"])
 def save_page():
@@ -61,16 +60,19 @@ def save_page():
         return jsonify({"error": "Missing url or collectionId"}), 400
 
     try:
-        # 1️⃣ URL 디코딩 먼저 수행
         url = unquote(original_url)
         parsed = urlparse(url)
 
-        # safe_url을 미리 디코딩한 후, 다시 필요한 만큼만 인코딩
-        raw_path = parsed.netloc + parsed.path + ('?' + parsed.query if parsed.query else '')
-        decoded_path = unquote(raw_path)  # 먼저 풀어주기
-        filename = quote(decoded_path, safe='') + ".html"  # 다시 안전하게 인코딩
+        # 🔥 헤더 추가 (브라우저처럼 보이기)
+        headers_for_request = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/122.0.0.0 Safari/537.36"
+            )
+        }
 
-        res = requests.get(url)
+        res = requests.get(url, headers=headers_for_request)
         soup = BeautifulSoup(res.text, "html.parser")
 
         for tag, attr in {"img": "src", "script": "src", "link": "href"}.items():
@@ -78,6 +80,8 @@ def save_page():
                 if node.has_attr(attr):
                     node[attr] = urljoin(url, node[attr])
 
+        safe_url = parsed.netloc + parsed.path + ('?' + parsed.query if parsed.query else '')
+        filename = quote(safe_url, safe='') + ".html"
         filepath = f"/tmp/{filename}"
 
         with open(filepath, "w", encoding="utf-8") as f:
@@ -88,7 +92,7 @@ def save_page():
         with open(filepath, "rb") as f:
             dbx.files_upload(f.read(), dropbox_path, mode=dropbox.files.WriteMode.overwrite)
 
-        shared_url = get_preview_link(dropbox_path)
+        shared_url = get_temporary_link(dropbox_path)
 
         title = soup.title.string.strip() if soup.title else "Untitled"
         domain_tag = parsed.netloc
@@ -117,9 +121,11 @@ def save_page():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+
 @app.route("/")
 def index():
     return send_from_directory(app.static_folder, "index.html")
+
 
 @app.route("/<path:path>")
 def serve_static(path):
@@ -127,6 +133,7 @@ def serve_static(path):
     if os.path.exists(file_path):
         return send_from_directory(app.static_folder, path)
     return send_from_directory(app.static_folder, "index.html")
+
 
 if __name__ == "__main__":
     app.run(debug=True, port=5000)
