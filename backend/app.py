@@ -63,26 +63,19 @@ def save_page():
         url = unquote(original_url)
         parsed = urlparse(url)
 
-        # 🔥 헤더 추가 (브라우저처럼 보이기)
-        headers_for_request = {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/122.0.0.0 Safari/537.36"
-            )
-        }
+        # 🔧 파일명 처리
+        raw_path = parsed.netloc + parsed.path + ('?' + parsed.query if parsed.query else '')
+        safe_path = raw_path.replace('/', '_')
+        filename = quote(safe_path, safe='') + ".html"
+        filepath = f"/tmp/{filename}"
 
-        res = requests.get(url, headers=headers_for_request)
+        res = requests.get(url)
         soup = BeautifulSoup(res.text, "html.parser")
 
         for tag, attr in {"img": "src", "script": "src", "link": "href"}.items():
             for node in soup.find_all(tag):
                 if node.has_attr(attr):
                     node[attr] = urljoin(url, node[attr])
-
-        safe_url = parsed.netloc + parsed.path + ('?' + parsed.query if parsed.query else '')
-        filename = quote(safe_url, safe='') + ".html"
-        filepath = f"/tmp/{filename}"
 
         with open(filepath, "w", encoding="utf-8") as f:
             f.write(str(soup))
