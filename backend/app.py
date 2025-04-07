@@ -56,7 +56,8 @@ def save_page():
 
     try:
         # 🧼 1. 모바일에서 들어온 이중 인코딩 URL을 디코딩
-        url = unquote(original_url)
+    # URL 이중 디코딩 처리
+        url = unquote(unquote(original_url))
         parsed = urlparse(url)
 
         res = requests.get(url)
