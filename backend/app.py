@@ -1,9 +1,8 @@
-# backend/app.py
 from flask import Flask, request, jsonify, send_from_directory
 import requests
 import dropbox
 from bs4 import BeautifulSoup
-from urllib.parse import urlparse, urljoin
+from urllib.parse import urlparse, urljoin, quote
 import os
 
 app = Flask(__name__, static_folder="../frontend/dist", static_url_path="/")
@@ -33,7 +32,6 @@ def get_dropbox_client():
         oauth2_refresh_token=DROPBOX_REFRESH_TOKEN
     )
 
-# Dropbox에서 파일의 임시 링크를 가져오는 함수 추가
 def get_temporary_link(dropbox_path):
     dbx = get_dropbox_client()
     link = dbx.files_get_temporary_link(dropbox_path).link
@@ -67,7 +65,8 @@ def save_page():
                     node[attr] = urljoin(url, node[attr])
 
         parsed = urlparse(url)
-        filename = parsed.netloc + parsed.path.replace("/", "_") + ".html"
+        safe_url = parsed.netloc + parsed.path + ('?' + parsed.query if parsed.query else '')
+        filename = quote(safe_url, safe='') + ".html"  # 안전한 파일 이름
         filepath = f"/tmp/{filename}"
 
         with open(filepath, "w", encoding="utf-8") as f:
@@ -78,7 +77,6 @@ def save_page():
         with open(filepath, "rb") as f:
             dbx.files_upload(f.read(), dropbox_path, mode=dropbox.files.WriteMode.overwrite)
 
-        # 임시 다운로드 링크를 가져오기
         shared_url = get_temporary_link(dropbox_path)
 
         title = soup.title.string.strip() if soup.title else "Untitled"
@@ -90,7 +88,7 @@ def save_page():
             "Content-Type": "application/json"
         }
         payload = {
-            "link": shared_url,  # 임시 다운로드 링크 사용
+            "link": shared_url,
             "title": title,
             "excerpt": url,
             "tags": [domain_tag],
