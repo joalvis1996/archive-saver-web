@@ -2,7 +2,7 @@ from flask import Flask, request, jsonify, send_from_directory
 import requests
 import dropbox
 from bs4 import BeautifulSoup
-from urllib.parse import urlparse, urljoin, unquote, quote_plus
+from urllib.parse import urlparse, urljoin, quote, unquote
 import os
 
 app = Flask(__name__, static_folder="../frontend/dist", static_url_path="/")
@@ -55,41 +55,36 @@ def save_page():
         return jsonify({"error": "Missing url or collectionId"}), 400
 
     try:
-        # ✅ 필요할 경우 한 번만 디코딩 (불필요한 중복 제거)
-        decoded_url = unquote(original_url)
-        parsed = urlparse(decoded_url)
+        # 1️⃣ URL 디코딩 먼저 수행
+        url = unquote(original_url)
+        parsed = urlparse(url)
 
-        # ✅ HTML 다운로드
-        res = requests.get(decoded_url)
+        res = requests.get(url)
         soup = BeautifulSoup(res.text, "html.parser")
 
         for tag, attr in {"img": "src", "script": "src", "link": "href"}.items():
             for node in soup.find_all(tag):
                 if node.has_attr(attr):
-                    node[attr] = urljoin(decoded_url, node[attr])
+                    node[attr] = urljoin(url, node[attr])
 
-        # ✅ 파일 이름은 디코딩된 경로로 만들고, 그걸 quote 처리
-        raw_path = parsed.netloc + parsed.path + (f"?{parsed.query}" if parsed.query else "")
-        safe_filename = quote(raw_path, safe='') + ".html"
-        filepath = f"/tmp/{safe_filename}"
+        # 2️⃣ 안전한 파일 이름 생성
+        safe_url = parsed.netloc + parsed.path + ('?' + parsed.query if parsed.query else '')
+        filename = quote(safe_url, safe='') + ".html"
+        filepath = f"/tmp/{filename}"
 
-        # ✅ 파일 저장
         with open(filepath, "w", encoding="utf-8") as f:
             f.write(str(soup))
 
-        # ✅ Dropbox 업로드
         dbx = get_dropbox_client()
-        dropbox_path = f"/web-archives/{safe_filename}"
+        dropbox_path = f"/web-archives/{filename}"
         with open(filepath, "rb") as f:
             dbx.files_upload(f.read(), dropbox_path, mode=dropbox.files.WriteMode.overwrite)
 
-        # ✅ Dropbox 링크 생성
         shared_url = get_temporary_link(dropbox_path)
 
-        # ✅ Raindrop 저장
         title = soup.title.string.strip() if soup.title else "Untitled"
         domain_tag = parsed.netloc
-        cover_image_url = extract_cover_image(soup, decoded_url)
+        cover_image_url = extract_cover_image(soup, url)
 
         headers = {
             "Authorization": f"Bearer {RAINDROP_ACCESS_TOKEN}",
@@ -98,7 +93,7 @@ def save_page():
         payload = {
             "link": shared_url,
             "title": title,
-            "excerpt": decoded_url,
+            "excerpt": url,
             "tags": [domain_tag],
             "collection": {"$id": collection_id}
         }
