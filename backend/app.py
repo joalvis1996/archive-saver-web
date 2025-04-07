@@ -2,7 +2,7 @@ from flask import Flask, request, jsonify, send_from_directory
 import requests
 import dropbox
 from bs4 import BeautifulSoup
-from urllib.parse import urlparse, urljoin, quote
+from urllib.parse import urlparse, urljoin, quote, unquote
 import os
 
 app = Flask(__name__, static_folder="../frontend/dist", static_url_path="/")
@@ -11,7 +11,6 @@ DROPBOX_REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN")
 APP_KEY = os.getenv("DROPBOX_APP_KEY")
 APP_SECRET = os.getenv("DROPBOX_APP_SECRET")
 RAINDROP_ACCESS_TOKEN = os.getenv("RAINDROP_ACCESS_TOKEN")
-
 
 def extract_cover_image(soup, base_url):
     og = soup.find("meta", property="og:image")
@@ -49,13 +48,17 @@ def get_collections():
 @app.route("/api/save", methods=["POST"])
 def save_page():
     data = request.json
-    url = data.get("url")
+    original_url = data.get("url")
     collection_id = data.get("collectionId")
 
-    if not url or not collection_id:
+    if not original_url or not collection_id:
         return jsonify({"error": "Missing url or collectionId"}), 400
 
     try:
+        # 1️⃣ URL 디코딩 먼저 수행
+        url = unquote(original_url)
+        parsed = urlparse(url)
+
         res = requests.get(url)
         soup = BeautifulSoup(res.text, "html.parser")
 
@@ -64,9 +67,9 @@ def save_page():
                 if node.has_attr(attr):
                     node[attr] = urljoin(url, node[attr])
 
-        parsed = urlparse(url)
+        # 2️⃣ 안전한 파일 이름 생성
         safe_url = parsed.netloc + parsed.path + ('?' + parsed.query if parsed.query else '')
-        filename = quote(safe_url, safe='') + ".html"  # 안전한 파일 이름
+        filename = quote(safe_url, safe='') + ".html"
         filepath = f"/tmp/{filename}"
 
         with open(filepath, "w", encoding="utf-8") as f:
