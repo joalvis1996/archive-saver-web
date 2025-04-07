@@ -63,13 +63,21 @@ def save_page():
         url = unquote(original_url)
         parsed = urlparse(url)
 
-        # 🔧 파일명 처리
+        # 안전한 파일 이름 생성
         raw_path = parsed.netloc + parsed.path + ('?' + parsed.query if parsed.query else '')
         safe_path = raw_path.replace('/', '_')
         filename = quote(safe_path, safe='') + ".html"
         filepath = f"/tmp/{filename}"
 
-        res = requests.get(url)
+        # 📌 데스크탑 User-Agent 추가
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/123.0.0.0 Safari/537.36"
+            )
+        }
+        res = requests.get(url, headers=headers)
         soup = BeautifulSoup(res.text, "html.parser")
 
         for tag, attr in {"img": "src", "script": "src", "link": "href"}.items():
@@ -91,7 +99,7 @@ def save_page():
         domain_tag = parsed.netloc
         cover_image_url = extract_cover_image(soup, url)
 
-        headers = {
+        raindrop_headers = {
             "Authorization": f"Bearer {RAINDROP_ACCESS_TOKEN}",
             "Content-Type": "application/json"
         }
@@ -105,7 +113,7 @@ def save_page():
         if cover_image_url:
             payload["cover"] = cover_image_url
 
-        r = requests.post("https://api.raindrop.io/rest/v1/raindrop", headers=headers, json=payload)
+        r = requests.post("https://api.raindrop.io/rest/v1/raindrop", headers=raindrop_headers, json=payload)
         if r.status_code == 200:
             return jsonify({"message": "저장 완료!"})
         else:
