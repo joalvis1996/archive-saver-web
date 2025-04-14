@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: archive-saver-web
+    env: python
+    buildCommand: |
+      cd frontend && npm install && npm run build
+      cd ../backend
+      pip install -r requirements.txt
+      python -m playwright install chromium
+    startCommand: gunicorn --chdir backend app:app --bind 0.0.0.0:5000
+    envVars:
+      - key: DROPBOX_REFRESH_TOKEN
+        sync: false
+      - key: DROPBOX_APP_KEY
+        sync: false
+      - key: DROPBOX_APP_SECRET
+        sync: false
+      - key: RAINDROP_ACCESS_TOKEN
+        sync: false
