@@ -67,6 +67,7 @@ def fetch_page_html_with_playwright(url: str) -> str:
 @app.route("/api/collections", methods=["GET"])
 def get_collections():
     try:
+        print("액세스 토큰", RAINDROP_ACCESS_TOKEN)
         headers = {"Authorization": f"Bearer {RAINDROP_ACCESS_TOKEN}"}
         res = requests.get("https://api.raindrop.io/rest/v1/collections", headers=headers)
 
