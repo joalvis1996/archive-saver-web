@@ -13,6 +13,15 @@ APP_KEY = os.getenv("DROPBOX_APP_KEY")
 APP_SECRET = os.getenv("DROPBOX_APP_SECRET")
 RAINDROP_ACCESS_TOKEN = os.getenv("RAINDROP_ACCESS_TOKEN")
 
+
+print("=== 환경변수 디버깅 ===")
+print("DROPBOX_REFRESH_TOKEN:", os.getenv("DROPBOX_REFRESH_TOKEN"))
+print("APP_KEY:", os.getenv("DROPBOX_APP_KEY"))
+print("APP_SECRET:", os.getenv("DROPBOX_APP_SECRET"))
+print("RAINDROP_ACCESS_TOKEN:", os.getenv("RAINDROP_ACCESS_TOKEN"))
+print("=======================")
+
+
 def extract_cover_image(soup, base_url):
     og = soup.find("meta", property="og:image")
     if og and og.get("content"):
