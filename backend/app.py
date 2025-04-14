@@ -2,7 +2,7 @@ from flask import Flask, request, jsonify, send_from_directory
 import requests
 import dropbox
 from bs4 import BeautifulSoup
-from urllib.parse import urlparse, urljoin, quote, unquote
+from urllib.parse import urlparse, urljoin, unquote, parse_qs
 import os
 
 app = Flask(__name__, static_folder="../frontend/dist", static_url_path="/")
@@ -11,6 +11,7 @@ DROPBOX_REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN")
 APP_KEY = os.getenv("DROPBOX_APP_KEY")
 APP_SECRET = os.getenv("DROPBOX_APP_SECRET")
 RAINDROP_ACCESS_TOKEN = os.getenv("RAINDROP_ACCESS_TOKEN")
+
 
 def extract_cover_image(soup, base_url):
     og = soup.find("meta", property="og:image")
@@ -24,6 +25,7 @@ def extract_cover_image(soup, base_url):
         return urljoin(base_url, link["href"])
     return None
 
+
 def get_dropbox_client():
     return dropbox.Dropbox(
         app_key=APP_KEY,
@@ -31,9 +33,31 @@ def get_dropbox_client():
         oauth2_refresh_token=DROPBOX_REFRESH_TOKEN
     )
 
-def get_temporary_link(dropbox_path):
+def get_shared_link(dropbox_path):
     dbx = get_dropbox_client()
-    return dbx.files_get_temporary_link(dropbox_path).link
+    
+    # 기존 공유 링크가 있으면 재사용
+    links = dbx.sharing_list_shared_links(path=dropbox_path).links
+    if links:
+        return links[0].url.replace("?dl=0", "?dl=0")
+
+    # 없으면 새로 생성
+    settings = dropbox.sharing.SharedLinkSettings(requested_visibility=dropbox.sharing.RequestedVisibility.public)
+    link = dbx.sharing_create_shared_link_with_settings(dropbox_path, settings).url
+    return link.replace("?dl=0", "?dl=0")
+
+
+
+def generate_filename(parsed):
+    query = parse_qs(parsed.query)
+    doc_id = query.get("document_srl", [""])[0]
+
+    if doc_id:
+        return f"{parsed.netloc}_{doc_id}.html"
+    else:
+        last_segment = parsed.path.strip("/").replace("/", "_") or "index"
+        return f"{parsed.netloc}_{last_segment}.html"
+
 
 @app.route("/api/collections", methods=["GET"])
 def get_collections():
@@ -43,6 +67,7 @@ def get_collections():
         return jsonify(res.json().get("items", []))
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
 
 @app.route("/api/save", methods=["POST"])
 def save_page():
@@ -57,14 +82,12 @@ def save_page():
         url = unquote(unquote(original_url))
         parsed = urlparse(url)
 
-        # ✅ m.fmkorea.com → www.fmkorea.com 변환
+        # m.fmkorea.com → www.fmkorea.com 교체
         if parsed.netloc == "m.fmkorea.com":
             parsed = parsed._replace(netloc="www.fmkorea.com")
             url = parsed.geturl()
 
-        raw_path = parsed.netloc + parsed.path + ('?' + parsed.query if parsed.query else '')
-        safe_path = raw_path.replace('/', '_')
-        filename = quote(safe_path, safe='') + ".html"
+        filename = generate_filename(parsed)
         filepath = f"/tmp/{filename}"
 
         headers = {
@@ -90,7 +113,7 @@ def save_page():
         with open(filepath, "rb") as f:
             dbx.files_upload(f.read(), dropbox_path, mode=dropbox.files.WriteMode.overwrite)
 
-        shared_url = get_temporary_link(dropbox_path)
+        shared_url = get_shared_link(dropbox_path)
 
         title = soup.title.string.strip() if soup.title else "Untitled"
         domain_tag = parsed.netloc
@@ -119,9 +142,11 @@ def save_page():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+
 @app.route("/")
 def index():
     return send_from_directory(app.static_folder, "index.html")
+
 
 @app.route("/<path:path>")
 def serve_static(path):
@@ -129,6 +154,7 @@ def serve_static(path):
     if os.path.exists(file_path):
         return send_from_directory(app.static_folder, path)
     return send_from_directory(app.static_folder, "index.html")
+
 
 if __name__ == "__main__":
     app.run(debug=True, port=5000)
