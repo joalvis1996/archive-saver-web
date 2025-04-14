@@ -3,8 +3,13 @@ services:
     name: archive-saver
     env: python
     buildCommand: |
+      echo "✅ Installing frontend..."
       cd frontend && npm install && npm run build
-      cd ../backend && pip install -r requirements.txt && python -m playwright install chromium
+      echo "✅ Installing backend requirements..."
+      cd ../backend && pip install --upgrade pip
+      pip install -r requirements.txt
+      echo "✅ Installing Playwright browser..."
+      python -m playwright install chromium
     startCommand: gunicorn --chdir backend app:app --bind 0.0.0.0:5000
     buildFilter:
       paths:
