@@ -1,9 +1,11 @@
 from flask import Flask, request, jsonify, send_from_directory
-import requests
 import dropbox
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse, urljoin, unquote, parse_qs
 import os
+import requests
+
+from playwright.sync_api import sync_playwright
 
 app = Flask(__name__, static_folder="../frontend/dist", static_url_path="/")
 
@@ -11,7 +13,6 @@ DROPBOX_REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN")
 APP_KEY = os.getenv("DROPBOX_APP_KEY")
 APP_SECRET = os.getenv("DROPBOX_APP_SECRET")
 RAINDROP_ACCESS_TOKEN = os.getenv("RAINDROP_ACCESS_TOKEN")
-
 
 def extract_cover_image(soup, base_url):
     og = soup.find("meta", property="og:image")
@@ -25,7 +26,6 @@ def extract_cover_image(soup, base_url):
         return urljoin(base_url, link["href"])
     return None
 
-
 def get_dropbox_client():
     return dropbox.Dropbox(
         app_key=APP_KEY,
@@ -35,29 +35,35 @@ def get_dropbox_client():
 
 def get_shared_link(dropbox_path):
     dbx = get_dropbox_client()
-    
-    # 기존 공유 링크가 있으면 재사용
     links = dbx.sharing_list_shared_links(path=dropbox_path).links
     if links:
         return links[0].url.replace("?dl=0", "?dl=0")
-
-    # 없으면 새로 생성
     settings = dropbox.sharing.SharedLinkSettings(requested_visibility=dropbox.sharing.RequestedVisibility.public)
-    link = dbx.sharing_create_shared_link_with_settings(dropbox_path, settings).url
-    return link.replace("?dl=0", "?dl=0")
-
-
+    return dbx.sharing_create_shared_link_with_settings(dropbox_path, settings).url.replace("?dl=0", "?dl=0")
 
 def generate_filename(parsed):
     query = parse_qs(parsed.query)
     doc_id = query.get("document_srl", [""])[0]
-
     if doc_id:
         return f"{parsed.netloc}_{doc_id}.html"
     else:
         last_segment = parsed.path.strip("/").replace("/", "_") or "index"
         return f"{parsed.netloc}_{last_segment}.html"
 
+def fetch_page_html_with_playwright(url: str) -> str:
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context(user_agent=(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/123.0.0.0 Safari/537.36"
+        ))
+        page = context.new_page()
+        page.goto(url, timeout=30000)
+        page.wait_for_load_state("networkidle")
+        html = page.content()
+        browser.close()
+        return html
 
 @app.route("/api/collections", methods=["GET"])
 def get_collections():
@@ -67,7 +73,6 @@ def get_collections():
         return jsonify(res.json().get("items", []))
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
 
 @app.route("/api/save", methods=["POST"])
 def save_page():
@@ -82,7 +87,6 @@ def save_page():
         url = unquote(unquote(original_url))
         parsed = urlparse(url)
 
-        # m.fmkorea.com → www.fmkorea.com 교체
         if parsed.netloc == "m.fmkorea.com":
             parsed = parsed._replace(netloc="www.fmkorea.com")
             url = parsed.geturl()
@@ -90,15 +94,8 @@ def save_page():
         filename = generate_filename(parsed)
         filepath = f"/tmp/{filename}"
 
-        headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/123.0.0.0 Safari/537.36"
-            )
-        }
-        res = requests.get(url, headers=headers)
-        soup = BeautifulSoup(res.text, "html.parser")
+        html = fetch_page_html_with_playwright(url)
+        soup = BeautifulSoup(html, "html.parser")
 
         for tag, attr in {"img": "src", "script": "src", "link": "href"}.items():
             for node in soup.find_all(tag):
@@ -114,7 +111,6 @@ def save_page():
             dbx.files_upload(f.read(), dropbox_path, mode=dropbox.files.WriteMode.overwrite)
 
         shared_url = get_shared_link(dropbox_path)
-
         title = soup.title.string.strip() if soup.title else "Untitled"
         domain_tag = parsed.netloc
         cover_image_url = extract_cover_image(soup, url)
@@ -142,11 +138,9 @@ def save_page():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-
 @app.route("/")
 def index():
     return send_from_directory(app.static_folder, "index.html")
-
 
 @app.route("/<path:path>")
 def serve_static(path):
@@ -154,7 +148,6 @@ def serve_static(path):
     if os.path.exists(file_path):
         return send_from_directory(app.static_folder, path)
     return send_from_directory(app.static_folder, "index.html")
-
 
 if __name__ == "__main__":
     app.run(debug=True, port=5000)
