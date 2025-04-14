@@ -69,6 +69,13 @@ def get_collections():
     try:
         headers = {"Authorization": f"Bearer {RAINDROP_ACCESS_TOKEN}"}
         res = requests.get("https://api.raindrop.io/rest/v1/collections", headers=headers)
+
+        # 디버깅용 출력
+        print("Raindrop 응답 상태코드:", res.status_code)
+        print("Raindrop 응답 내용:", res.text)
+
+        res.raise_for_status()  # 응답이 200이 아니면 예외 발생
+
         return jsonify(res.json().get("items", []))
     except Exception as e:
         return jsonify({"error": str(e)}), 500
