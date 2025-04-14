@@ -7,5 +7,5 @@ services:
     buildCommand: |
       cd frontend && npm install && npm run build
       cd ../backend && pip install -r requirements.txt
-      python -m playwright install chromium
+      python -m playwright install --with-deps chromium
     startCommand: gunicorn --chdir backend app:app --bind 0.0.0.0:5000
