@@ -3,17 +3,18 @@ services:
     name: archive-saver
     env: python
     plan: free
-    region: singapore
+    rootDir: .
     buildCommand: |
-      echo "✅ Step 1: Install frontend deps"
       cd frontend && npm install && npm run build
-
-      echo "✅ Step 2: Install backend deps"
-      cd ../backend
-      pip install --upgrade pip
-      pip install -r requirements.txt
-
-      echo "✅ Step 3: Install Playwright"
+      cd ../backend && pip install -r requirements.txt
       python -m playwright install chromium
-    startCommand: gunicorn app:app --bind 0.0.0.0:5000
-    rootDir: backend
+    startCommand: gunicorn --chdir backend app:app --bind 0.0.0.0:5000
+    envVars:
+      - key: DROPBOX_REFRESH_TOKEN
+        fromEnvVar: DROPBOX_REFRESH_TOKEN
+      - key: DROPBOX_APP_KEY
+        fromEnvVar: DROPBOX_APP_KEY
+      - key: DROPBOX_APP_SECRET
+        fromEnvVar: DROPBOX_APP_SECRET
+      - key: RAINDROP_ACCESS_TOKEN
+        fromEnvVar: RAINDROP_ACCESS_TOKEN
