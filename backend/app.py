@@ -4,7 +4,6 @@ from bs4 import BeautifulSoup
 from urllib.parse import urlparse, urljoin, unquote, parse_qs
 import os
 import requests
-
 from playwright.sync_api import sync_playwright
 
 app = Flask(__name__, static_folder="../frontend/dist", static_url_path="/")
@@ -129,7 +128,11 @@ def save_page():
         if cover_image_url:
             payload["cover"] = cover_image_url
 
+
         r = requests.post("https://api.raindrop.io/rest/v1/raindrop", headers=raindrop_headers, json=payload)
+        print("Raindrop 응답 상태코드:", r.status_code)
+        print("Raindrop 응답 내용:", r.text)
+
         if r.status_code == 200:
             return jsonify({"message": "저장 완료!"})
         else:
