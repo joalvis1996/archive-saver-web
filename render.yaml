@@ -9,13 +9,13 @@ services:
       cd ../backend && pip install -r requirements.txt
       python -m playwright install chromium
     startCommand: gunicorn --chdir backend app:app --bind 0.0.0.0:5000
-    envVars:
+    fromEnvVars:
       - key: DROPBOX_REFRESH_TOKEN
-        value: null
+        value: DROPBOX_REFRESH_TOKEN
       - key: DROPBOX_APP_KEY
-        value: null
+        value: DROPBOX_APP_KEY
       - key: DROPBOX_APP_SECRET
-        value: null
+        value: DROPBOX_APP_SECRET
       - key: RAINDROP_ACCESS_TOKEN
-        value: null
+        value: RAINDROP_ACCESS_TOKEN
 
