@@ -11,10 +11,10 @@ services:
     startCommand: gunicorn --chdir backend app:app --bind 0.0.0.0:5000
     envVars:
       - key: DROPBOX_REFRESH_TOKEN
-        fromEnvVar: DROPBOX_REFRESH_TOKEN
+        value: "_tgbrRGQUMAAAAAAAAAAVXaFbyvOgViei7yHZG2t8fsxBsPB7ZVW7WC2J51UeDT"
       - key: DROPBOX_APP_KEY
-        fromEnvVar: DROPBOX_APP_KEY
+        value: "zjaukc6akjoqtix"
       - key: DROPBOX_APP_SECRET
-        fromEnvVar: DROPBOX_APP_SECRET
+        value: "9lruirpnuwfik78"
       - key: RAINDROP_ACCESS_TOKEN
-        fromEnvVar: RAINDROP_ACCESS_TOKEN
+        value: "5895e933-d2cc-400c-8d3f-944b7b24bf8f"
