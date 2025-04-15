@@ -1,6 +1,6 @@
-Flask
+flask
+gunicorn
+dropbox
 requests
 beautifulsoup4
-dropbox
-gunicorn
 playwright
