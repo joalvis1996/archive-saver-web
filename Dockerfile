@@ -1,24 +1,24 @@
 FROM mcr.microsoft.com/playwright/python:v1.42.0-jammy
 
-# 1. Node.js 설치 추가 (v18 기준 예시)
+# Install Node.js
 RUN curl -fsSL https://deb.nodesource.com/setup_18.x | bash - && \
     apt-get install -y nodejs
 
-# 2. 작업 디렉토리 설정
+# Set working directory
 WORKDIR /app
 
-# 3. frontend 복사 및 빌드
+# Copy and build frontend
 COPY frontend /app/frontend
 WORKDIR /app/frontend
 RUN npm install && npm run build
 
-# 4. backend 설정
+# Install backend dependencies
 WORKDIR /app
 COPY backend /app/backend
 COPY backend/requirements.txt /app/backend/requirements.txt
 RUN pip install --upgrade pip && pip install -r /app/backend/requirements.txt
 
-# 5. 포트 노출 및 실행
+# Expose and launch backend
 WORKDIR /app/backend
 EXPOSE 5000
-CMD ["gunicorn", "--chdir", "backend", "app:app", "--bind", "0.0.0.0:5000"]
+CMD ["gunicorn", "app:app", "--bind", "0.0.0.0:5000"]
