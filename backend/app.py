@@ -92,25 +92,24 @@ def get_collections():
 
 @app.route("/api/save", methods=["POST"])
 def save_page():
-    data = request.json
-    original_url = data.get("url")
-    collection_id = data.get("collectionId")
+   print("=== /api/save 호출됨 ===")
+        data = request.json
+        print("받은 데이터:", data)
 
-    if not original_url or not collection_id:
-        return jsonify({"error": "Missing url or collectionId"}), 400
+        original_url = data.get("url")
+        collection_id = data.get("collectionId")
 
-    try:
+        if not original_url or not collection_id:
+            print("URL 또는 Collection ID 없음")
+            return jsonify({"error": "Missing url or collectionId"}), 400
+
         url = unquote(unquote(original_url))
         parsed = urlparse(url)
+        print("변환된 URL:", url)
 
-        if parsed.netloc == "m.fmkorea.com":
-            parsed = parsed._replace(netloc="www.fmkorea.com")
-            url = parsed.geturl()
-
-        filename = generate_filename(parsed)
-        filepath = f"/tmp/{filename}"
-
+        # Playwright HTML 추출 단계에서 문제 확인
         html = fetch_page_html_with_playwright(url)
+        print("HTML 길이:", len(html))
         soup = BeautifulSoup(html, "html.parser")
 
         for tag, attr in {"img": "src", "script": "src", "link": "href"}.items():
