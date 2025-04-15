@@ -90,9 +90,11 @@ def get_collections():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+
 @app.route("/api/save", methods=["POST"])
 def save_page():
-   print("=== /api/save 호출됨 ===")
+    try:
+        print("=== /api/save 호출됨 ===")
         data = request.json
         print("받은 데이터:", data)
 
@@ -107,7 +109,13 @@ def save_page():
         parsed = urlparse(url)
         print("변환된 URL:", url)
 
-        # Playwright HTML 추출 단계에서 문제 확인
+        if parsed.netloc == "m.fmkorea.com":
+            parsed = parsed._replace(netloc="www.fmkorea.com")
+            url = parsed.geturl()
+
+        filename = generate_filename(parsed)
+        filepath = f"/tmp/{filename}"
+
         html = fetch_page_html_with_playwright(url)
         print("HTML 길이:", len(html))
         soup = BeautifulSoup(html, "html.parser")
@@ -144,7 +152,6 @@ def save_page():
         if cover_image_url:
             payload["cover"] = cover_image_url
 
-
         r = requests.post("https://api.raindrop.io/rest/v1/raindrop", headers=raindrop_headers, json=payload)
         print("Raindrop 응답 상태코드:", r.status_code)
         print("Raindrop 응답 내용:", r.text)
@@ -155,7 +162,12 @@ def save_page():
             return jsonify({"error": f"저장 실패: {r.status_code}"}), 500
 
     except Exception as e:
+        print("예외 발생:", str(e))
         return jsonify({"error": str(e)}), 500
+
+
+
+       
 
 @app.route("/")
 def index():
