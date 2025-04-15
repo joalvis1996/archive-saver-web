@@ -60,7 +60,10 @@ def generate_filename(parsed):
 
 def fetch_page_html_with_playwright(url: str) -> str:
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        browser = p.chromium.launch(
+            headless=True,
+            args=["--no-sandbox"]  # <== Render에서 꼭 필요!
+        )
         context = browser.new_context(user_agent=(
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -72,6 +75,7 @@ def fetch_page_html_with_playwright(url: str) -> str:
         html = page.content()
         browser.close()
         return html
+
 
 @app.route("/api/collections", methods=["GET"])
 def get_collections():
@@ -165,9 +169,6 @@ def save_page():
         print("예외 발생:", str(e))
         return jsonify({"error": str(e)}), 500
 
-
-
-       
 
 @app.route("/")
 def index():
