@@ -73,7 +73,14 @@ def save_html_direct():
         filepath = f"/tmp/{filename}"
 
         soup = BeautifulSoup(html, "html.parser")
-        for tag, attr in {"img": "src", "script": "src", "link": "href"}.items():
+        for tag, attr in {
+            "img": "src",
+            "script": "src",
+            "link": "href",
+            "source": "src",
+            "video": "src",
+            "iframe": "src",
+        }.items():
             for node in soup.find_all(tag):
                 if node.has_attr(attr):
                     node[attr] = urljoin(url, node[attr])
