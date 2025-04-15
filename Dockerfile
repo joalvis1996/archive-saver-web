@@ -12,7 +12,7 @@ RUN npm install && npm run build
 # 4. backend 설정
 WORKDIR /app
 COPY backend /app/backend
-COPY requirements.txt /app/backend/requirements.txt
+COPY backend/requirements.txt /app/backend/requirements.txt
 RUN pip install --upgrade pip && pip install -r /app/backend/requirements.txt
 
 # 5. Playwright 브라우저 설치
