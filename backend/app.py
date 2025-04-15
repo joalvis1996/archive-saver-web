@@ -64,18 +64,24 @@ def fetch_page_html_with_playwright(url: str) -> str:
             headless=True,
             args=["--disable-dev-shm-usage", "--no-sandbox"]
         )
+        context = browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
+            ),
+            viewport={"width": 1280, "height": 720},
+            java_script_enabled=True
+        )
 
-        context = browser.new_context(user_agent=(
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/123.0.0.0 Safari/537.36"
-        ))
         page = context.new_page()
-        page.goto(url, timeout=30000)
-        page.wait_for_load_state("networkidle")
+        context.route("**/*", lambda route, request: route.abort() if request.resource_type in ["image", "media", "font"] else route.continue_())
+
+        page.goto(url, timeout=90000)  # ⬅️ 90초로 늘림
+        page.wait_for_load_state("networkidle", timeout=90000)
         html = page.content()
         browser.close()
         return html
+
 
 
 @app.route("/api/collections", methods=["GET"])
