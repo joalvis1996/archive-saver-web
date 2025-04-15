@@ -3,4 +3,5 @@ gunicorn
 dropbox
 requests
 beautifulsoup4
+playwright-stealth
 playwright
