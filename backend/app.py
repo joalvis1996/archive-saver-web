@@ -5,6 +5,7 @@ from urllib.parse import urlparse, urljoin, unquote, parse_qs
 import os
 import requests
 from playwright.sync_api import sync_playwright
+from playwright_stealth import stealth_sync
 
 app = Flask(__name__, static_folder="../frontend/dist", static_url_path="/")
 
@@ -62,22 +63,18 @@ def fetch_page_html_with_playwright(url: str) -> str:
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=True,
-            args=["--disable-dev-shm-usage", "--no-sandbox"]
+            args=["--disable-blink-features=AutomationControlled", "--no-sandbox", "--disable-dev-shm-usage"]
         )
         context = browser.new_context(
             user_agent=(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
-            ),
-            viewport={"width": 1280, "height": 720},
-            java_script_enabled=True
+            )
         )
-
         page = context.new_page()
-        context.route("**/*", lambda route, request: route.abort() if request.resource_type in ["image", "media", "font"] else route.continue_())
-
-        page.goto(url, timeout=90000)  # ⬅️ 90초로 늘림
-        page.wait_for_load_state("networkidle", timeout=90000)
+        stealth_sync(page)  # cloudflare 회피용
+        page.goto(url, timeout=60000)
+        page.wait_for_load_state("networkidle")
         html = page.content()
         browser.close()
         return html
@@ -102,6 +99,7 @@ def get_collections():
         return jsonify({"error": str(e)}), 500
 
 
+
 @app.route("/api/save", methods=["POST"])
 def save_page():
     try:
@@ -116,13 +114,16 @@ def save_page():
             print("URL 또는 Collection ID 없음")
             return jsonify({"error": "Missing url or collectionId"}), 400
 
+        # 대안 2: URL 내 m.fmkorea.com 을 www.fmkorea.com 으로 강제 변경
         url = unquote(unquote(original_url))
-        parsed = urlparse(url)
-        print("변환된 URL:", url)
 
-        if parsed.netloc == "m.fmkorea.com":
-            parsed = parsed._replace(netloc="www.fmkorea.com")
-            url = parsed.geturl()
+        # 무조건 모바일 URL일 경우 PC 버전으로 교체
+        if "m.fmkorea.com" in url:
+            url = url.replace("m.fmkorea.com", "www.fmkorea.com")
+
+        parsed = urlparse(url)
+        print("강제 PC 버전 URL로 변환됨:", url)
+
 
         filename = generate_filename(parsed)
         filepath = f"/tmp/{filename}"
