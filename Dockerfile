@@ -1,10 +1,13 @@
-# 1. 베이스 이미지
 FROM mcr.microsoft.com/playwright/python:v1.42.0-jammy
+
+# 1. Node.js 설치 추가 (v18 기준 예시)
+RUN curl -fsSL https://deb.nodesource.com/setup_18.x | bash - && \
+    apt-get install -y nodejs
 
 # 2. 작업 디렉토리 설정
 WORKDIR /app
 
-# 3. frontend 빌드
+# 3. frontend 복사 및 빌드
 COPY frontend /app/frontend
 WORKDIR /app/frontend
 RUN npm install && npm run build
@@ -15,11 +18,7 @@ COPY backend /app/backend
 COPY backend/requirements.txt /app/backend/requirements.txt
 RUN pip install --upgrade pip && pip install -r /app/backend/requirements.txt
 
-# 5. Playwright 브라우저 설치
-RUN playwright install chromium
-
-# 6. 포트 설정 (Flask + Gunicorn)
+# 5. 포트 노출 및 실행
+WORKDIR /app/backend
 EXPOSE 5000
-
-# 7. 실행 명령
 CMD ["gunicorn", "--chdir", "backend", "app:app", "--bind", "0.0.0.0:5000"]
