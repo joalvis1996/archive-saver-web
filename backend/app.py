@@ -3,6 +3,7 @@ import dropbox
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse, urljoin, unquote, parse_qs
 import os
+import time
 import requests
 from playwright.sync_api import sync_playwright
 from playwright_stealth import stealth_sync
@@ -77,14 +78,16 @@ def fetch_page_html_with_playwright(url: str) -> str:
         )
 
         page = context.new_page()
-        stealth_sync(page)  # cloudflare 우회
+        stealth_sync(page)
 
-        page.goto(url, timeout=90000)  # 90초까지 허용
-        page.wait_for_load_state("networkidle", timeout=60000)
+        page.goto(url, timeout=90000)
+
+        # 💡 wait_for_load_state 대신 sleep
+        time.sleep(8)  # 8초 대기 후 HTML 저장
+
         html = page.content()
         browser.close()
         return html
-
 
 
 
