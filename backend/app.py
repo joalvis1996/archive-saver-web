@@ -65,19 +65,26 @@ def fetch_page_html_with_playwright(url: str) -> str:
             headless=True,
             args=["--disable-blink-features=AutomationControlled", "--no-sandbox", "--disable-dev-shm-usage"]
         )
+
         context = browser.new_context(
             user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
-            )
+                "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) "
+                "AppleWebKit/605.1.15 (KHTML, like Gecko) "
+                "Version/16.0 Mobile/15E148 Safari/604.1"
+            ),
+            viewport={"width": 375, "height": 812},
+            java_script_enabled=True
         )
+
         page = context.new_page()
-        stealth_sync(page)  # cloudflare 회피용
-        page.goto(url, timeout=60000)
-        page.wait_for_load_state("networkidle")
+        stealth_sync(page)  # cloudflare 우회
+
+        page.goto(url, timeout=90000)  # 90초까지 허용
+        page.wait_for_load_state("networkidle", timeout=60000)
         html = page.content()
         browser.close()
         return html
+
 
 
 
