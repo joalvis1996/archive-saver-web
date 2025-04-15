@@ -79,7 +79,7 @@ def save_html_direct():
             "link": "href",
             "source": "src",
             "video": "src",
-            "iframe": "src",
+            "iframe": "src"
         }.items():
             for node in soup.find_all(tag):
                 if node.has_attr(attr):
