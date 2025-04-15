@@ -5,8 +5,6 @@ from urllib.parse import urlparse, urljoin, unquote, parse_qs
 import os
 import time
 import requests
-from playwright.sync_api import sync_playwright
-from playwright_stealth import stealth_sync
 
 app = Flask(__name__, static_folder="../frontend/dist", static_url_path="/")
 
@@ -15,14 +13,12 @@ APP_KEY = os.getenv("DROPBOX_APP_KEY")
 APP_SECRET = os.getenv("DROPBOX_APP_SECRET")
 RAINDROP_ACCESS_TOKEN = os.getenv("RAINDROP_ACCESS_TOKEN")
 
-
 print("=== 환경변수 디버깅 ===")
-print("DROPBOX_REFRESH_TOKEN:", os.getenv("DROPBOX_REFRESH_TOKEN"))
-print("APP_KEY:", os.getenv("DROPBOX_APP_KEY"))
-print("APP_SECRET:", os.getenv("DROPBOX_APP_SECRET"))
-print("RAINDROP_ACCESS_TOKEN:", os.getenv("RAINDROP_ACCESS_TOKEN"))
+print("DROPBOX_REFRESH_TOKEN:", DROPBOX_REFRESH_TOKEN)
+print("APP_KEY:", APP_KEY)
+print("APP_SECRET:", APP_SECRET)
+print("RAINDROP_ACCESS_TOKEN:", RAINDROP_ACCESS_TOKEN)
 print("=======================")
-
 
 def extract_cover_image(soup, base_url):
     og = soup.find("meta", property="og:image")
@@ -60,88 +56,23 @@ def generate_filename(parsed):
         last_segment = parsed.path.strip("/").replace("/", "_") or "index"
         return f"{parsed.netloc}_{last_segment}.html"
 
-def fetch_page_html_with_playwright(url: str) -> str:
-    with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=True,
-            args=["--disable-blink-features=AutomationControlled", "--no-sandbox", "--disable-dev-shm-usage"]
-        )
-
-        context = browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) "
-                "AppleWebKit/605.1.15 (KHTML, like Gecko) "
-                "Version/16.0 Mobile/15E148 Safari/604.1"
-            ),
-            viewport={"width": 375, "height": 812},
-            java_script_enabled=True
-        )
-
-        page = context.new_page()
-        stealth_sync(page)
-
-        page.goto(url, timeout=90000)
-
-        # 💡 wait_for_load_state 대신 sleep
-        time.sleep(8)  # 8초 대기 후 HTML 저장
-
-        html = page.content()
-        browser.close()
-        return html
-
-
-
-@app.route("/api/collections", methods=["GET"])
-def get_collections():
+@app.route("/api/save-html", methods=["POST"])
+def save_html_direct():
     try:
-        print("액세스 토큰", RAINDROP_ACCESS_TOKEN)
-        headers = {"Authorization": f"Bearer {RAINDROP_ACCESS_TOKEN}"}
-        res = requests.get("https://api.raindrop.io/rest/v1/collections", headers=headers)
-
-        # 디버깅용 출력
-        print("Raindrop 응답 상태코드:", res.status_code)
-        print("Raindrop 응답 내용:", res.text)
-
-        res.raise_for_status()  # 응답이 200이 아니면 예외 발생
-
-        return jsonify(res.json().get("items", []))
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-
-@app.route("/api/save", methods=["POST"])
-def save_page():
-    try:
-        print("=== /api/save 호출됨 ===")
+        print("=== /api/save-html 호출됨 ===")
         data = request.json
-        print("받은 데이터:", data)
-
-        original_url = data.get("url")
+        url = data.get("url")
+        html = data.get("html")
         collection_id = data.get("collectionId")
 
-        if not original_url or not collection_id:
-            print("URL 또는 Collection ID 없음")
-            return jsonify({"error": "Missing url or collectionId"}), 400
-
-        # 대안 2: URL 내 m.fmkorea.com 을 www.fmkorea.com 으로 강제 변경
-        url = unquote(unquote(original_url))
-
-        # 무조건 모바일 URL일 경우 PC 버전으로 교체
-        if "m.fmkorea.com" in url:
-            url = url.replace("m.fmkorea.com", "www.fmkorea.com")
+        if not url or not html or not collection_id:
+            return jsonify({"error": "Missing fields"}), 400
 
         parsed = urlparse(url)
-        print("강제 PC 버전 URL로 변환됨:", url)
-
-
         filename = generate_filename(parsed)
         filepath = f"/tmp/{filename}"
 
-        html = fetch_page_html_with_playwright(url)
-        print("HTML 길이:", len(html))
         soup = BeautifulSoup(html, "html.parser")
-
         for tag, attr in {"img": "src", "script": "src", "link": "href"}.items():
             for node in soup.find_all(tag):
                 if node.has_attr(attr):
@@ -175,18 +106,24 @@ def save_page():
             payload["cover"] = cover_image_url
 
         r = requests.post("https://api.raindrop.io/rest/v1/raindrop", headers=raindrop_headers, json=payload)
-        print("Raindrop 응답 상태코드:", r.status_code)
-        print("Raindrop 응답 내용:", r.text)
-
         if r.status_code == 200:
             return jsonify({"message": "저장 완료!"})
         else:
-            return jsonify({"error": f"저장 실패: {r.status_code}"}), 500
+            return jsonify({"error": f"Raindrop 저장 실패: {r.status_code}"}), 500
 
     except Exception as e:
         print("예외 발생:", str(e))
         return jsonify({"error": str(e)}), 500
 
+@app.route("/api/collections", methods=["GET"])
+def get_collections():
+    try:
+        headers = {"Authorization": f"Bearer {RAINDROP_ACCESS_TOKEN}"}
+        res = requests.get("https://api.raindrop.io/rest/v1/collections", headers=headers)
+        res.raise_for_status()
+        return jsonify(res.json().get("items", []))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/")
 def index():
@@ -198,6 +135,3 @@ def serve_static(path):
     if os.path.exists(file_path):
         return send_from_directory(app.static_folder, path)
     return send_from_directory(app.static_folder, "index.html")
-
-# if __name__ == "__main__":
-#     app.run(debug=True, port=5000)

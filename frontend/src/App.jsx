@@ -4,6 +4,7 @@ import axios from 'axios';
 
 function App() {
   const [url, setUrl] = useState('');
+  const [htmlContent, setHtmlContent] = useState('');
   const [collections, setCollections] = useState([]);
   const [selectedCollection, setSelectedCollection] = useState(null);
   const [status, setStatus] = useState('');
@@ -46,13 +47,23 @@ function App() {
       setStatus('❌ 유효하지 않은 URL 형식입니다.');
       return;
     }
+
     setProgress(10);
-    setStatus('저장 중...');
+    setStatus('페이지 HTML 가져오는 중...');
     try {
-      const res = await axios.post('/api/save', {
+      const response = await fetch(url);
+      const text = await response.text();
+      setHtmlContent(text);
+
+      setProgress(40);
+      setStatus('서버에 저장 요청 중...');
+
+      const res = await axios.post('/api/save-html', {
         url,
+        html: text,
         collectionId: selectedCollection
       });
+
       setProgress(100);
       setStatus(res.data.message || '저장 성공!');
     } catch (err) {
