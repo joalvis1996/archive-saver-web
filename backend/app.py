@@ -73,6 +73,7 @@ def save_html_direct():
         filepath = f"/tmp/{filename}"
 
         soup = BeautifulSoup(html, "html.parser")
+
         for tag, attr in {
             "img": "src",
             "script": "src",
@@ -84,6 +85,26 @@ def save_html_direct():
             for node in soup.find_all(tag):
                 if node.has_attr(attr):
                     node[attr] = urljoin(url, node[attr])
+
+        for video in soup.find_all("video"):
+            video_src = video.get("src")
+            if video_src:
+                full_video_url = urljoin(url, video_src)
+                try:
+                    video_data = requests.get(full_video_url, headers={"Referer": url}, timeout=10).content
+                    video_filename = os.path.basename(urlparse(full_video_url).path)
+                    video_path = f"/tmp/{video_filename}"
+
+                    with open(video_path, "wb") as f:
+                        f.write(video_data)
+
+                    dropbox_video_path = f"/web-archives/videos/{video_filename}"
+                    with open(video_path, "rb") as f:
+                        get_dropbox_client().files_upload(f.read(), dropbox_video_path, mode=dropbox.files.WriteMode.overwrite)
+
+                    video["src"] = get_shared_link(dropbox_video_path)
+                except Exception as e:
+                    print("❌ 영상 다운로드 실패:", full_video_url, e)
 
         with open(filepath, "w", encoding="utf-8") as f:
             f.write(str(soup))
