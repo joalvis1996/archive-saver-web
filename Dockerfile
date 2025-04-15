@@ -20,5 +20,6 @@ RUN pip install --upgrade pip && pip install -r /app/backend/requirements.txt
 
 # 5. 백엔드 시작 (이게 중요!)
 WORKDIR /app/backend
-CMD /bin/sh -c "gunicorn app:app --bind 0.0.0.0:$PORT"
+CMD gunicorn app:app --bind 0.0.0.0:$PORT --timeout 120
+
 
