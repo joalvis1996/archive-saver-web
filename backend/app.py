@@ -56,6 +56,7 @@ def generate_filename(parsed):
         last_segment = parsed.path.strip("/").replace("/", "_") or "index"
         return f"{parsed.netloc}_{last_segment}.html"
 
+
 @app.route("/api/save-html", methods=["POST"])
 def save_html_direct():
     try:
