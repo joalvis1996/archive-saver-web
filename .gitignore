@@ -25,3 +25,8 @@ dist-ssr
 
 # 환결설정
 .env
+
+# Android
+android/.gradle
+android/local.properties
+android/**/build

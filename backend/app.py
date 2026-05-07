@@ -649,6 +649,7 @@ def save_html_direct():
         html = data.get("html")
         collection_id = data.get("collectionId")
         collection_title = data.get("collectionTitle") or DEFAULT_SHARED_COLLECTION_TITLE
+        client_capture_mode = data.get("clientCaptureMode")
 
         if not url:
             return jsonify({"error": "Missing URL"}), 400
@@ -665,6 +666,14 @@ def save_html_direct():
 
         provided_html = html
         html = provided_html
+
+        if client_capture_mode and not html:
+            return jsonify({
+                "error": (
+                    "앱에서 페이지 HTML을 캡처하지 못했습니다. "
+                    "서버 재시도는 FMKorea 보안 페이지로 이어질 수 있어 중단했습니다."
+                )
+            }), 422
 
         if not html and USE_PLAYWRIGHT_CAPTURE:
             try:
