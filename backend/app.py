@@ -652,17 +652,23 @@ def download_and_save_media(media_url, base_url, media_type="media", use_base64=
             print(f"❌ 미디어 다운로드 실패 ({media_type}): {media_url}, {e}")
             return None
 
+def log_save_phase(label, started_at):
+    elapsed = time.perf_counter() - started_at
+    print(f"⏱️ {label}: {elapsed:.2f}s")
+
 
 @app.route("/api/save-html", methods=["POST"])
 def save_html_direct():
     try:
         print("=== /api/save-html 호출됨 ===")
+        request_started_at = time.perf_counter()
         data = request.json
         url = data.get("url")
         html = data.get("html")
         collection_id = data.get("collectionId")
         collection_title = data.get("collectionTitle") or DEFAULT_SHARED_COLLECTION_TITLE
         client_capture_mode = data.get("clientCaptureMode")
+        lightweight_capture_mode = client_capture_mode == "android-webview"
 
         if not url:
             return jsonify({"error": "Missing URL"}), 400
@@ -673,6 +679,7 @@ def save_html_direct():
 
         if not collection_id:
             collection_id = find_collection_id_by_title(collection_title)
+            print(f"ℹ️ 컬렉션 조회 완료: {collection_title} -> {collection_id}")
 
         if not collection_id:
             return jsonify({"error": f"'{collection_title}' 컬렉션을 찾지 못했습니다."}), 400
@@ -690,7 +697,9 @@ def save_html_direct():
 
         if not html and USE_PLAYWRIGHT_CAPTURE:
             try:
+                playwright_started_at = time.perf_counter()
                 captured_html = render_page_html_with_playwright(url)
+                log_save_phase("Playwright 캡처", playwright_started_at)
                 if is_security_challenge_html(captured_html):
                     print("⚠️ Playwright 캡처가 FMKorea 보안 페이지로 차단되었습니다.")
                     return security_challenge_response()
@@ -702,7 +711,9 @@ def save_html_direct():
 
         if not html:
             print("HTML 본문 없음, 서버에서 페이지를 가져옵니다.")
+            fetch_started_at = time.perf_counter()
             html = fetch_page_html(url)
+            log_save_phase("서버 HTML fetch", fetch_started_at)
 
         if is_security_challenge_html(html):
             print("⚠️ FMKorea 보안 페이지 감지: 저장을 중단합니다.")
@@ -713,6 +724,7 @@ def save_html_direct():
         filepath = f"/tmp/{filename}"
 
         soup = BeautifulSoup(html, "html.parser")
+        html_parse_started_at = time.perf_counter()
 
         # 상대 URL을 절대 URL로 변환
         for tag, attr in {
@@ -727,11 +739,16 @@ def save_html_direct():
             for node in soup.find_all(tag):
                 if node.has_attr(attr):
                     node[attr] = urljoin(url, node[attr])
+        log_save_phase("상대 URL 절대화", html_parse_started_at)
 
+        stylesheet_started_at = time.perf_counter()
         inline_stylesheets(soup, url)
+        log_save_phase("스타일시트 인라인", stylesheet_started_at)
 
         # 모든 이미지 다운로드 및 저장 (GIF 포함)
         print("🖼️ 이미지 처리 중...")
+        image_started_at = time.perf_counter()
+        image_saved_count = 0
         for img in soup.find_all("img"):
             # src 속성 처리
             img_src = img.get("src")
@@ -744,6 +761,7 @@ def save_html_direct():
                 shared_link = download_and_save_media(img_src, url, media_type)
                 if shared_link:
                     img["src"] = shared_link
+                    image_saved_count += 1
                     print(f"✅ 이미지 저장 완료: {img_src}")
             
             # 지연 로딩 속성 처리 (data-src, data-lazy-src 등)
@@ -762,6 +780,7 @@ def save_html_direct():
                         # 지연 로딩 속성이 있고 src가 없으면 src에도 설정
                         if not img.get("src"):
                             img["src"] = shared_link
+                        image_saved_count += 1
                         print(f"✅ 지연 로딩 이미지 저장 완료 ({lazy_attr}): {lazy_src}")
             
             # img 태그의 srcset 속성 처리 (반응형 이미지)
@@ -784,6 +803,7 @@ def save_html_direct():
                                 srcset_parts.append(f"{shared_link} {descriptor}")
                             else:
                                 srcset_parts.append(shared_link)
+                            image_saved_count += 1
                             print(f"✅ img srcset 이미지 저장 완료: {image_url}")
                         else:
                             # 실패한 경우 원본 유지
@@ -791,88 +811,95 @@ def save_html_direct():
                 
                 if srcset_parts:
                     img["srcset"] = ", ".join(srcset_parts)
+        print(f"ℹ️ 이미지 저장 수: {image_saved_count}")
+        log_save_phase("이미지 처리", image_started_at)
 
-        # video 태그의 src 속성 처리
-        print("🎥 video 태그 처리 중...")
-        for video in soup.find_all("video"):
-            # src 속성 처리
-            video_src = video.get("src")
-            if video_src:
-                # 비디오는 파일 크기가 크므로 Dropbox 링크 사용 (base64 사용 안 함)
-                shared_link = download_and_save_media(video_src, url, "videos", use_base64=False)
-                if shared_link:
-                    video["src"] = shared_link
-                    print(f"✅ 비디오 저장 완료: {video_src}")
-            
-            # 지연 로딩 속성 처리 (data-src 등)
-            for lazy_attr in ["data-src", "data-lazy-src", "data-original", "data-url"]:
-                lazy_src = video.get(lazy_attr)
-                if lazy_src:
-                    # 비디오는 파일 크기가 크므로 Dropbox 링크 사용
-                    shared_link = download_and_save_media(lazy_src, url, "videos", use_base64=False)
-                    if shared_link:
-                        video[lazy_attr] = shared_link
-                        if not video.get("src"):
-                            video["src"] = shared_link
-                        print(f"✅ 지연 로딩 비디오 저장 완료 ({lazy_attr}): {lazy_src}")
-            
-            # poster 속성 처리 (비디오 썸네일) - 이미지이므로 base64 사용
-            poster_src = video.get("poster")
-            if poster_src:
-                shared_link = download_and_save_media(poster_src, url, "images", use_base64=True)
-                if shared_link:
-                    video["poster"] = shared_link
-                    print(f"✅ 비디오 포스터 저장 완료: {poster_src}")
+        if lightweight_capture_mode:
+            print("⚡ android-webview 경량 모드: 비디오/오디오 다운로드는 건너뜁니다.")
+        else:
+            video_started_at = time.perf_counter()
+            video_saved_count = 0
+            audio_saved_count = 0
 
-        # video 태그 내부의 모든 source 태그 처리
-        print("🎬 video > source 태그 처리 중...")
-        for video in soup.find_all("video"):
-            for source in video.find_all("source"):
+            # video 태그의 src 속성 처리
+            print("🎥 video 태그 처리 중...")
+            for video in soup.find_all("video"):
                 # src 속성 처리
-                source_src = source.get("src")
-                if source_src:
-                    # 비디오는 파일 크기가 크므로 Dropbox 링크 사용
-                    shared_link = download_and_save_media(source_src, url, "videos", use_base64=False)
+                video_src = video.get("src")
+                if video_src:
+                    shared_link = download_and_save_media(video_src, url, "videos", use_base64=False)
                     if shared_link:
-                        source["src"] = shared_link
-                        print(f"✅ 비디오 소스 저장 완료: {source_src}")
+                        video["src"] = shared_link
+                        video_saved_count += 1
+                        print(f"✅ 비디오 저장 완료: {video_src}")
                 
-                # 지연 로딩 속성 처리
                 for lazy_attr in ["data-src", "data-lazy-src", "data-original", "data-url"]:
-                    lazy_src = source.get(lazy_attr)
+                    lazy_src = video.get(lazy_attr)
                     if lazy_src:
-                        # 비디오는 파일 크기가 크므로 Dropbox 링크 사용
                         shared_link = download_and_save_media(lazy_src, url, "videos", use_base64=False)
                         if shared_link:
-                            source[lazy_attr] = shared_link
-                            if not source.get("src"):
-                                source["src"] = shared_link
-                            print(f"✅ 지연 로딩 비디오 소스 저장 완료 ({lazy_attr}): {lazy_src}")
-
-        # audio 태그 처리
-        print("🔊 audio 태그 처리 중...")
-        for audio in soup.find_all("audio"):
-            audio_src = audio.get("src")
-            if audio_src:
-                # 오디오는 파일 크기가 클 수 있으므로 Dropbox 링크 사용
-                shared_link = download_and_save_media(audio_src, url, "audio", use_base64=False)
-                if shared_link:
-                    audio["src"] = shared_link
-                    print(f"✅ 오디오 저장 완료: {audio_src}")
-
-        # audio > source 태그 처리
-        for audio in soup.find_all("audio"):
-            for source in audio.find_all("source"):
-                source_src = source.get("src")
-                if source_src:
-                    # 오디오는 파일 크기가 클 수 있으므로 Dropbox 링크 사용
-                    shared_link = download_and_save_media(source_src, url, "audio", use_base64=False)
+                            video[lazy_attr] = shared_link
+                            if not video.get("src"):
+                                video["src"] = shared_link
+                            video_saved_count += 1
+                            print(f"✅ 지연 로딩 비디오 저장 완료 ({lazy_attr}): {lazy_src}")
+                
+                poster_src = video.get("poster")
+                if poster_src:
+                    shared_link = download_and_save_media(poster_src, url, "images", use_base64=True)
                     if shared_link:
-                        source["src"] = shared_link
-                        print(f"✅ 오디오 소스 저장 완료: {source_src}")
+                        video["poster"] = shared_link
+                        image_saved_count += 1
+                        print(f"✅ 비디오 포스터 저장 완료: {poster_src}")
+
+            print("🎬 video > source 태그 처리 중...")
+            for video in soup.find_all("video"):
+                for source in video.find_all("source"):
+                    source_src = source.get("src")
+                    if source_src:
+                        shared_link = download_and_save_media(source_src, url, "videos", use_base64=False)
+                        if shared_link:
+                            source["src"] = shared_link
+                            video_saved_count += 1
+                            print(f"✅ 비디오 소스 저장 완료: {source_src}")
+                    
+                    for lazy_attr in ["data-src", "data-lazy-src", "data-original", "data-url"]:
+                        lazy_src = source.get(lazy_attr)
+                        if lazy_src:
+                            shared_link = download_and_save_media(lazy_src, url, "videos", use_base64=False)
+                            if shared_link:
+                                source[lazy_attr] = shared_link
+                                if not source.get("src"):
+                                    source["src"] = shared_link
+                                video_saved_count += 1
+                                print(f"✅ 지연 로딩 비디오 소스 저장 완료 ({lazy_attr}): {lazy_src}")
+
+            print("🔊 audio 태그 처리 중...")
+            for audio in soup.find_all("audio"):
+                audio_src = audio.get("src")
+                if audio_src:
+                    shared_link = download_and_save_media(audio_src, url, "audio", use_base64=False)
+                    if shared_link:
+                        audio["src"] = shared_link
+                        audio_saved_count += 1
+                        print(f"✅ 오디오 저장 완료: {audio_src}")
+
+            for audio in soup.find_all("audio"):
+                for source in audio.find_all("source"):
+                    source_src = source.get("src")
+                    if source_src:
+                        shared_link = download_and_save_media(source_src, url, "audio", use_base64=False)
+                        if shared_link:
+                            source["src"] = shared_link
+                            audio_saved_count += 1
+                            print(f"✅ 오디오 소스 저장 완료: {source_src}")
+
+            print(f"ℹ️ 비디오 저장 수: {video_saved_count}, 오디오 저장 수: {audio_saved_count}")
+            log_save_phase("비디오/오디오 처리", video_started_at)
 
         # picture > source 태그 처리 (반응형 이미지)
         print("🖼️ picture > source 태그 처리 중...")
+        picture_started_at = time.perf_counter()
         for picture in soup.find_all("picture"):
             for source in picture.find_all("source"):
                 source_srcset = source.get("srcset")
@@ -903,16 +930,23 @@ def save_html_direct():
                     
                     if srcset_parts:
                         source["srcset"] = ", ".join(srcset_parts)
+        log_save_phase("picture/source 처리", picture_started_at)
 
+        fallback_started_at = time.perf_counter()
         add_archive_media_fallbacks(soup)
+        log_save_phase("아카이브 미디어 후처리", fallback_started_at)
 
+        write_started_at = time.perf_counter()
         with open(filepath, "w", encoding="utf-8") as f:
             f.write(str(soup))
+        log_save_phase("임시 HTML 쓰기", write_started_at)
 
         dbx = get_dropbox_client()
         dropbox_path = f"/web-archives/{filename}"
+        upload_started_at = time.perf_counter()
         with open(filepath, "rb") as f:
             dbx.files_upload(f.read(), dropbox_path, mode=dropbox.files.WriteMode.overwrite)
+        log_save_phase("Dropbox HTML 업로드", upload_started_at)
 
         archive_url = get_archive_url(filename)
         # Dropbox 링크는 백업용으로 유지하고, Raindrop에는 Archive Saver 뷰어 URL을 저장합니다.
@@ -936,7 +970,10 @@ def save_html_direct():
         if cover_image_url:
             payload["cover"] = cover_image_url
 
+        raindrop_started_at = time.perf_counter()
         r = requests.post("https://api.raindrop.io/rest/v1/raindrop", headers=raindrop_headers, json=payload)
+        log_save_phase("Raindrop 저장", raindrop_started_at)
+        log_save_phase("전체 저장 요청", request_started_at)
         if r.status_code == 200:
             return jsonify({
                 "message": "저장 완료!",
