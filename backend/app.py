@@ -479,6 +479,18 @@ def manifest():
         "theme_color": "#111827",
         "icons": [
             {
+                "src": "/archive-icon-192.png",
+                "sizes": "192x192",
+                "type": "image/png",
+                "purpose": "any"
+            },
+            {
+                "src": "/archive-icon-512.png",
+                "sizes": "512x512",
+                "type": "image/png",
+                "purpose": "any maskable"
+            },
+            {
                 "src": "/archive-icon.svg",
                 "sizes": "any",
                 "type": "image/svg+xml",
