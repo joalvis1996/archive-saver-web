@@ -39,6 +39,12 @@ const getSharedUrlFromLocation = () => {
   return '';
 };
 
+const buildBookmarklet = () => {
+  const endpoint = `${window.location.origin}/api/save-html`;
+  const script = `(async()=>{const e=${JSON.stringify(endpoint)};const a=['data-src','data-lazy-src','data-original','data-url'];document.querySelectorAll('img,video,audio,source,iframe').forEach(n=>{for(const t of a){const v=n.getAttribute(t);if(v&&!n.getAttribute('src'))n.setAttribute('src',v)}const s=n.getAttribute('data-srcset');if(s&&!n.getAttribute('srcset'))n.setAttribute('srcset',s);if(n.tagName==='VIDEO'||n.tagName==='AUDIO'){n.setAttribute('controls','');n.removeAttribute('autoplay')}});const h='<!DOCTYPE html>\\n'+document.documentElement.outerHTML;try{const r=await fetch(e,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:location.href,html:h,title:document.title})});const d=await r.json().catch(()=>({}));alert(r.ok?'Archive Saver 저장 완료\\n'+(d.archiveUrl||''):'Archive Saver 저장 실패\\n'+(d.error||r.status))}catch(t){alert('Archive Saver 저장 실패\\n'+t.message)}})()`;
+  return `javascript:${script}`;
+};
+
 function App() {
   const [url, setUrl] = useState(() => getSharedUrlFromLocation());
   const [sharedUrl] = useState(() => getSharedUrlFromLocation());
@@ -55,6 +61,8 @@ function App() {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [autoSaveAttempted, setAutoSaveAttempted] = useState(false);
+  const [bookmarkletCopied, setBookmarkletCopied] = useState(false);
+  const bookmarklet = buildBookmarklet();
 
   useEffect(() => {
     if (sharedUrl) {
@@ -174,6 +182,15 @@ function App() {
   const handleSubmit = () => savePage(url);
 
   const isButtonDisabled = !url || !selectedCollection || isSaving;
+  const handleCopyBookmarklet = async () => {
+    try {
+      await navigator.clipboard.writeText(bookmarklet);
+      setBookmarkletCopied(true);
+      setTimeout(() => setBookmarkletCopied(false), 1800);
+    } catch (err) {
+      setStatus('북마클릿 복사 실패: ' + err.message);
+    }
+  };
 
   return (
     <div style={styles.fullscreenCentered}>
@@ -229,6 +246,25 @@ function App() {
         <div style={styles.status}>{status}</div>
         <div style={styles.progressWrapper}>
           <div style={{ ...styles.progressBar, width: `${progress}%` }} />
+        </div>
+        <div style={styles.bookmarkletPanel}>
+          <div style={styles.bookmarkletTitle}>FMKorea 보안 페이지가 뜰 때</div>
+          <div style={styles.bookmarkletText}>
+            이 북마클릿을 브라우저 북마크 URL로 등록한 뒤, FMKorea 글에서 실행하면 현재 열린 페이지 내용을 축구 컬렉션에 저장합니다.
+          </div>
+          <textarea
+            readOnly
+            value={bookmarklet}
+            style={styles.bookmarkletCode}
+            aria-label="Archive Saver 북마클릿 코드"
+          />
+          <button
+            type="button"
+            onClick={handleCopyBookmarklet}
+            style={styles.secondaryButton}
+          >
+            {bookmarkletCopied ? '복사됨' : '북마클릿 복사'}
+          </button>
         </div>
       </div>
     </div>
@@ -321,6 +357,45 @@ const styles = {
     height: '100%',
     backgroundColor: '#32d74b',
     transition: 'width 0.3s ease-in-out'
+  },
+  bookmarkletPanel: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '8px',
+    marginTop: '8px',
+    paddingTop: '12px',
+    borderTop: '1px solid #374151'
+  },
+  bookmarkletTitle: {
+    fontWeight: 'bold',
+    fontSize: '14px',
+    color: '#f9fafb'
+  },
+  bookmarkletText: {
+    fontSize: '13px',
+    lineHeight: 1.45,
+    color: '#d1d5db'
+  },
+  bookmarkletCode: {
+    minHeight: '76px',
+    resize: 'vertical',
+    padding: '10px',
+    borderRadius: '6px',
+    border: '1px solid #555',
+    backgroundColor: '#111827',
+    color: '#e5e7eb',
+    fontSize: '12px',
+    lineHeight: 1.35
+  },
+  secondaryButton: {
+    padding: '10px',
+    backgroundColor: '#374151',
+    color: '#f9fafb',
+    borderRadius: '6px',
+    border: '1px solid #4b5563',
+    cursor: 'pointer',
+    fontWeight: 'bold',
+    fontSize: '14px'
   }
 };
 

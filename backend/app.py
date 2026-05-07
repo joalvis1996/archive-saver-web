@@ -17,6 +17,15 @@ APP_KEY = os.getenv("DROPBOX_APP_KEY")
 APP_SECRET = os.getenv("DROPBOX_APP_SECRET")
 RAINDROP_ACCESS_TOKEN = os.getenv("RAINDROP_ACCESS_TOKEN")
 USE_PLAYWRIGHT_CAPTURE = os.getenv("USE_PLAYWRIGHT_CAPTURE", "true").lower() != "false"
+DEFAULT_SHARED_COLLECTION_TITLE = os.getenv("DEFAULT_SHARED_COLLECTION_TITLE", "축구")
+CLIPPER_ALLOWED_ORIGINS = {
+    "https://archive-saver-web.onrender.com",
+    "http://127.0.0.1:5000",
+    "http://localhost:5000",
+    "https://fmkorea.com",
+    "https://www.fmkorea.com",
+    "https://m.fmkorea.com",
+}
 
 print("=== 환경변수 디버깅 ===")
 print("DROPBOX_REFRESH_TOKEN:", "set" if DROPBOX_REFRESH_TOKEN else "missing")
@@ -25,6 +34,30 @@ print("APP_SECRET:", "set" if APP_SECRET else "missing")
 print("RAINDROP_ACCESS_TOKEN:", "set" if RAINDROP_ACCESS_TOKEN else "missing")
 print("USE_PLAYWRIGHT_CAPTURE:", USE_PLAYWRIGHT_CAPTURE)
 print("=======================")
+
+def is_allowed_cors_origin(origin):
+    if not origin:
+        return False
+
+    if origin in CLIPPER_ALLOWED_ORIGINS:
+        return True
+
+    parsed = urlparse(origin)
+    return parsed.scheme == "https" and parsed.netloc.endswith(".fmkorea.com")
+
+@app.after_request
+def add_api_cors_headers(response):
+    if request.path != "/api/save-html":
+        return response
+
+    origin = request.headers.get("Origin")
+    if is_allowed_cors_origin(origin):
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Vary"] = "Origin"
+        response.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+
+    return response
 
 def extract_cover_image(soup, base_url):
     og = soup.find("meta", property="og:image")
@@ -49,6 +82,17 @@ def get_dropbox_client():
         app_secret=APP_SECRET,
         oauth2_refresh_token=DROPBOX_REFRESH_TOKEN
     )
+
+def find_collection_id_by_title(title):
+    headers = {"Authorization": f"Bearer {RAINDROP_ACCESS_TOKEN}"}
+    res = requests.get("https://api.raindrop.io/rest/v1/collections", headers=headers, timeout=30)
+    res.raise_for_status()
+
+    for collection in res.json().get("items", []):
+        if collection.get("title") == title:
+            return collection.get("_id")
+
+    return None
 
 def get_shared_link(dropbox_path, use_raw=False):
     """
@@ -604,13 +648,20 @@ def save_html_direct():
         url = data.get("url")
         html = data.get("html")
         collection_id = data.get("collectionId")
+        collection_title = data.get("collectionTitle") or DEFAULT_SHARED_COLLECTION_TITLE
 
-        if not url or not collection_id:
-            return jsonify({"error": "Missing fields"}), 400
+        if not url:
+            return jsonify({"error": "Missing URL"}), 400
 
         if is_security_challenge_html(html):
             print("⚠️ 제공된 HTML이 FMKorea 보안 페이지입니다.")
             return security_challenge_response()
+
+        if not collection_id:
+            collection_id = find_collection_id_by_title(collection_title)
+
+        if not collection_id:
+            return jsonify({"error": f"'{collection_title}' 컬렉션을 찾지 못했습니다."}), 400
 
         provided_html = html
         html = provided_html
