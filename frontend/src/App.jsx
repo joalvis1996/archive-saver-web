@@ -1,19 +1,65 @@
 // src/App.jsx
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import axios from 'axios';
 
+const LAST_COLLECTION_KEY = 'archiveSaver.lastCollectionId';
+
+const isValidUrl = value => /^https?:\/\/\S+$/i.test(value);
+
+const extractFirstUrl = value => {
+  if (!value) {
+    return '';
+  }
+
+  const match = value.match(/https?:\/\/[^\s<>"']+/i);
+  return match ? match[0] : '';
+};
+
+const getSharedUrlFromLocation = () => {
+  const params = new URLSearchParams(window.location.search);
+  const candidates = [
+    params.get('url'),
+    params.get('text'),
+    params.get('title')
+  ];
+
+  for (const candidate of candidates) {
+    const trimmed = candidate?.trim();
+    if (trimmed && isValidUrl(trimmed)) {
+      return trimmed;
+    }
+
+    const extracted = extractFirstUrl(trimmed);
+    if (isValidUrl(extracted)) {
+      return extracted;
+    }
+  }
+
+  return '';
+};
+
 function App() {
-  const [url, setUrl] = useState('');
-  const [htmlContent, setHtmlContent] = useState('');
+  const [url, setUrl] = useState(() => getSharedUrlFromLocation());
+  const [sharedUrl] = useState(() => getSharedUrlFromLocation());
   const [collections, setCollections] = useState([]);
-  const [selectedCollection, setSelectedCollection] = useState(null);
-  const [status, setStatus] = useState('');
+  const [selectedCollection, setSelectedCollection] = useState(() => (
+    localStorage.getItem(LAST_COLLECTION_KEY) || ''
+  ));
+  const [status, setStatus] = useState(() => (
+    getSharedUrlFromLocation()
+      ? '공유된 링크를 받았습니다. 컬렉션을 선택하면 바로 저장합니다.'
+      : ''
+  ));
   const [progress, setProgress] = useState(0);
   const [isRefreshing, setIsRefreshing] = useState(false);
-
-  const isValidUrl = url => /^https?:\/\/.+/.test(url);
+  const [isSaving, setIsSaving] = useState(false);
+  const [autoSaveAttempted, setAutoSaveAttempted] = useState(false);
 
   useEffect(() => {
+    if (sharedUrl) {
+      return;
+    }
+
     const tryReadClipboard = () => {
       if (document.hasFocus()) {
         navigator.clipboard.readText().then(text => {
@@ -28,7 +74,7 @@ function App() {
     };
     const timer = setTimeout(tryReadClipboard, 300);
     return () => clearTimeout(timer);
-  }, []);
+  }, [sharedUrl]);
 
   const loadCollections = () => {
     setIsRefreshing(true);
@@ -42,24 +88,47 @@ function App() {
     loadCollections();
   }, []);
 
-  const handleSubmit = async () => {
-    if (!isValidUrl(url)) {
+  const handleCollectionChange = event => {
+    const collectionId = event.target.value;
+    setSelectedCollection(collectionId);
+    localStorage.setItem(LAST_COLLECTION_KEY, collectionId);
+  };
+
+  const savePage = useCallback(async targetUrl => {
+    const trimmedUrl = targetUrl.trim();
+
+    if (!isValidUrl(trimmedUrl)) {
       setStatus('❌ 유효하지 않은 URL 형식입니다.');
       return;
     }
 
+    if (!selectedCollection) {
+      setStatus('컬렉션을 먼저 선택해주세요.');
+      return;
+    }
+
+    setIsSaving(true);
     setProgress(10);
     setStatus('페이지 HTML 가져오는 중...');
     try {
-      const response = await fetch(url);
-      const text = await response.text();
-      setHtmlContent(text);
+      let text = '';
+
+      try {
+        const response = await fetch(trimmedUrl);
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        text = await response.text();
+      } catch (fetchError) {
+        console.warn('브라우저 HTML 가져오기 실패, 서버에서 다시 시도합니다:', fetchError);
+        setStatus('브라우저에서 읽지 못해 서버에서 다시 가져오는 중...');
+      }
 
       setProgress(40);
       setStatus('서버에 저장 요청 중...');
 
       const res = await axios.post('/api/save-html', {
-        url,
+        url: trimmedUrl,
         html: text,
         collectionId: selectedCollection
       });
@@ -68,17 +137,32 @@ function App() {
       setStatus(res.data.message || '저장 성공!');
     } catch (err) {
       setStatus('저장 실패: ' + err.message);
+    } finally {
+      setIsSaving(false);
     }
-  };
+  }, [selectedCollection]);
 
-  const isButtonDisabled = !url || !selectedCollection;
+  useEffect(() => {
+    if (!sharedUrl || !selectedCollection || autoSaveAttempted) {
+      return;
+    }
+
+    setAutoSaveAttempted(true);
+    savePage(sharedUrl);
+  }, [autoSaveAttempted, savePage, selectedCollection, sharedUrl]);
+
+  const handleSubmit = () => savePage(url);
+
+  const isButtonDisabled = !url || !selectedCollection || isSaving;
 
   return (
     <div style={styles.fullscreenCentered}>
       <div style={styles.container}>
         <div style={styles.titleRow}>
-          <h2>📦 웹페이지 저장기</h2>
+          <h2>Archive Saver</h2>
           <button
+            type="button"
+            aria-label="컬렉션 새로고침"
             onClick={loadCollections}
             style={{
               ...styles.refreshButton,
@@ -88,6 +172,11 @@ function App() {
             disabled={isRefreshing}
           >⟳</button>
         </div>
+        {sharedUrl && (
+          <div style={styles.shareNotice}>
+            Android 공유로 받은 링크입니다.
+          </div>
+        )}
         <input
           type="text"
           placeholder="URL 입력"
@@ -97,7 +186,7 @@ function App() {
         />
         <select
           value={selectedCollection || ''}
-          onChange={e => setSelectedCollection(e.target.value)}
+          onChange={handleCollectionChange}
           style={styles.select}
         >
           <option value="" disabled>컬렉션 선택</option>
@@ -106,6 +195,7 @@ function App() {
           ))}
         </select>
         <button
+          type="button"
           onClick={handleSubmit}
           style={{
             ...styles.button,
@@ -114,7 +204,7 @@ function App() {
           }}
           disabled={isButtonDisabled}
         >
-          저장하기
+          {isSaving ? '저장 중...' : '저장하기'}
         </button>
         <div style={styles.status}>{status}</div>
         <div style={styles.progressWrapper}>
@@ -130,9 +220,9 @@ const styles = {
     display: 'flex',
     justifyContent: 'center',
     alignItems: 'center',
-    height: '100vh',
+    minHeight: '100vh',
     width: '100vw',
-    backgroundColor: '#1e1e1e',
+    backgroundColor: '#111827',
     padding: '16px',
     boxSizing: 'border-box'
   },
@@ -143,9 +233,9 @@ const styles = {
     flexDirection: 'column',
     gap: '10px',
     fontFamily: 'sans-serif',
-    backgroundColor: '#2c2c2e',
-    color: '#f0f0f0',
-    borderRadius: '12px',
+    backgroundColor: '#1f2937',
+    color: '#f9fafb',
+    borderRadius: '8px',
     padding: '24px',
     boxShadow: '0 4px 16px rgba(0, 0, 0, 0.3)'
   },
@@ -153,6 +243,14 @@ const styles = {
     display: 'flex',
     justifyContent: 'space-between',
     alignItems: 'center'
+  },
+  shareNotice: {
+    padding: '10px 12px',
+    borderRadius: '6px',
+    backgroundColor: '#0f766e',
+    color: '#ecfeff',
+    fontSize: '14px',
+    textAlign: 'left'
   },
   input: {
     padding: '10px',
