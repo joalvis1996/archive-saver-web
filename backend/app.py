@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, request, jsonify, send_from_directory, Response
 import dropbox
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse, urljoin, unquote, parse_qs
@@ -6,6 +6,7 @@ import os
 import time
 import requests
 import base64
+import json
 
 app = Flask(__name__, static_folder="../frontend/dist", static_url_path="/")
 
@@ -461,6 +462,43 @@ def get_collections():
         return jsonify(res.json().get("items", []))
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+@app.route("/manifest.webmanifest")
+def manifest():
+    scheme = request.headers.get("X-Forwarded-Proto", request.scheme).split(",")[0].strip()
+    host = request.headers.get("X-Forwarded-Host", request.host).split(",")[0].strip()
+    origin = f"{scheme}://{host}"
+    payload = {
+        "name": "Archive Saver",
+        "short_name": "Archive",
+        "description": "Save shared web pages to Raindrop through Archive Saver.",
+        "start_url": "/",
+        "scope": "/",
+        "display": "standalone",
+        "background_color": "#111827",
+        "theme_color": "#111827",
+        "icons": [
+            {
+                "src": "/archive-icon.svg",
+                "sizes": "any",
+                "type": "image/svg+xml",
+                "purpose": "any maskable"
+            }
+        ],
+        "share_target": {
+            "action": f"{origin}/share",
+            "method": "GET",
+            "params": {
+                "title": "title",
+                "text": "text",
+                "url": "url"
+            }
+        }
+    }
+    return Response(
+        json.dumps(payload, ensure_ascii=False),
+        mimetype="application/manifest+json"
+    )
 
 @app.route("/")
 def index():
