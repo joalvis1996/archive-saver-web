@@ -3,6 +3,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import axios from 'axios';
 
 const LAST_COLLECTION_KEY = 'archiveSaver.lastCollectionId';
+const SHARED_SAVE_COLLECTION_TITLE = '축구';
 
 const isValidUrl = value => /^https?:\/\/\S+$/i.test(value);
 
@@ -43,11 +44,11 @@ function App() {
   const [sharedUrl] = useState(() => getSharedUrlFromLocation());
   const [collections, setCollections] = useState([]);
   const [selectedCollection, setSelectedCollection] = useState(() => (
-    localStorage.getItem(LAST_COLLECTION_KEY) || ''
+    getSharedUrlFromLocation() ? '' : localStorage.getItem(LAST_COLLECTION_KEY) || ''
   ));
   const [status, setStatus] = useState(() => (
     getSharedUrlFromLocation()
-      ? '공유된 링크를 받았습니다. 컬렉션을 선택하면 바로 저장합니다.'
+      ? `'${SHARED_SAVE_COLLECTION_TITLE}' 컬렉션에 저장할 준비 중입니다.`
       : ''
   ));
   const [progress, setProgress] = useState(0);
@@ -87,6 +88,24 @@ function App() {
   useEffect(() => {
     loadCollections();
   }, []);
+
+  useEffect(() => {
+    if (!sharedUrl || !collections.length || selectedCollection) {
+      return;
+    }
+
+    const sharedCollection = collections.find(collection => (
+      collection.title === SHARED_SAVE_COLLECTION_TITLE
+    ));
+
+    if (!sharedCollection) {
+      setStatus(`'${SHARED_SAVE_COLLECTION_TITLE}' 컬렉션을 찾지 못했습니다.`);
+      return;
+    }
+
+    setSelectedCollection(sharedCollection._id);
+    setStatus(`'${SHARED_SAVE_COLLECTION_TITLE}' 컬렉션에 자동 저장합니다.`);
+  }, [collections, selectedCollection, sharedUrl]);
 
   const handleCollectionChange = event => {
     const collectionId = event.target.value;
@@ -174,7 +193,7 @@ function App() {
         </div>
         {sharedUrl && (
           <div style={styles.shareNotice}>
-            Android 공유로 받은 링크입니다.
+            Android 공유 링크는 축구 컬렉션에 저장합니다.
           </div>
         )}
         <input
