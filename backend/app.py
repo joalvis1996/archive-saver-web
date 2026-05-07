@@ -7,6 +7,8 @@ import time
 import requests
 import base64
 import json
+import re
+import mimetypes
 
 app = Flask(__name__, static_folder="../frontend/dist", static_url_path="/_static")
 
@@ -14,12 +16,14 @@ DROPBOX_REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN")
 APP_KEY = os.getenv("DROPBOX_APP_KEY")
 APP_SECRET = os.getenv("DROPBOX_APP_SECRET")
 RAINDROP_ACCESS_TOKEN = os.getenv("RAINDROP_ACCESS_TOKEN")
+USE_PLAYWRIGHT_CAPTURE = os.getenv("USE_PLAYWRIGHT_CAPTURE", "true").lower() != "false"
 
 print("=== 환경변수 디버깅 ===")
 print("DROPBOX_REFRESH_TOKEN:", "set" if DROPBOX_REFRESH_TOKEN else "missing")
 print("APP_KEY:", "set" if APP_KEY else "missing")
 print("APP_SECRET:", "set" if APP_SECRET else "missing")
 print("RAINDROP_ACCESS_TOKEN:", "set" if RAINDROP_ACCESS_TOKEN else "missing")
+print("USE_PLAYWRIGHT_CAPTURE:", USE_PLAYWRIGHT_CAPTURE)
 print("=======================")
 
 def extract_cover_image(soup, base_url):
@@ -99,6 +103,21 @@ def normalize_archive_filename(archive_id):
 
     return filename
 
+def normalize_media_filename(filename):
+    decoded_filename = unquote(filename).strip()
+
+    if (
+        not decoded_filename
+        or decoded_filename != os.path.basename(decoded_filename)
+        or ".." in decoded_filename
+    ):
+        raise ValueError("Invalid media filename")
+
+    return decoded_filename
+
+def get_archive_media_url(media_type, filename):
+    return f"/archive-media/{media_type}/{quote(filename, safe='')}"
+
 def fetch_page_html(url):
     headers = {
         "User-Agent": (
@@ -112,6 +131,103 @@ def fetch_page_html(url):
     response = requests.get(url, headers=headers, timeout=30)
     response.raise_for_status()
     return response.text
+
+def render_page_html_with_playwright(url):
+    from playwright.sync_api import sync_playwright
+
+    print("🎭 Playwright 렌더링 캡처 시작:", url)
+    with sync_playwright() as p:
+        browser = None
+        context = None
+
+        try:
+            browser = p.chromium.launch(
+                headless=True,
+                args=["--no-sandbox", "--disable-dev-shm-usage"]
+            )
+            context = browser.new_context(
+                viewport={"width": 390, "height": 1200},
+                device_scale_factor=2,
+                is_mobile=True,
+                has_touch=True,
+                locale="ko-KR",
+                user_agent=(
+                    "Mozilla/5.0 (Linux; Android 14; Mobile) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/124.0 Mobile Safari/537.36"
+                )
+            )
+            page = context.new_page()
+            page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            try:
+                page.wait_for_load_state("networkidle", timeout=10000)
+            except Exception:
+                print("⚠️ networkidle 대기 시간 초과, 현재 렌더링 상태로 저장을 계속합니다.")
+
+            page.wait_for_timeout(1500)
+            auto_scroll_page(page)
+            prepare_lazy_media(page)
+            html = page.content()
+        finally:
+            if context:
+                context.close()
+            if browser:
+                browser.close()
+
+    print("✅ Playwright 렌더링 캡처 완료")
+    return html
+
+def auto_scroll_page(page):
+    page.evaluate(
+        """
+        async () => {
+          const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+          let previousHeight = 0;
+
+          for (let i = 0; i < 24; i += 1) {
+            window.scrollTo(0, document.body.scrollHeight);
+            await delay(700);
+
+            const currentHeight = document.body.scrollHeight;
+            if (currentHeight === previousHeight) {
+              break;
+            }
+            previousHeight = currentHeight;
+          }
+
+          window.scrollTo(0, 0);
+          await delay(500);
+        }
+        """
+    )
+
+def prepare_lazy_media(page):
+    page.evaluate(
+        """
+        () => {
+          const lazyAttrs = ['data-src', 'data-lazy-src', 'data-original', 'data-url'];
+
+          document.querySelectorAll('img, video, audio, source, iframe').forEach(node => {
+            for (const attr of lazyAttrs) {
+              const value = node.getAttribute(attr);
+              if (value && !node.getAttribute('src')) {
+                node.setAttribute('src', value);
+              }
+            }
+
+            const lazySrcset = node.getAttribute('data-srcset');
+            if (lazySrcset && !node.getAttribute('srcset')) {
+              node.setAttribute('srcset', lazySrcset);
+            }
+          });
+
+          document.querySelectorAll('video, audio').forEach(node => {
+            node.setAttribute('controls', '');
+            node.removeAttribute('autoplay');
+          });
+        }
+        """
+    )
 
 def download_and_convert_to_base64(media_url, base_url):
     """
@@ -165,6 +281,241 @@ def download_and_convert_to_base64(media_url, base_url):
         print(f"❌ 미디어 다운로드 및 변환 실패: {media_url}, {e}")
         return None
 
+def download_text_resource(resource_url, base_url):
+    try:
+        full_url = urljoin(base_url, resource_url)
+        response = requests.get(full_url, headers={"Referer": base_url}, timeout=30)
+        response.raise_for_status()
+        response.encoding = response.encoding or "utf-8"
+        return response.text, full_url
+    except Exception as e:
+        print(f"❌ 텍스트 리소스 다운로드 실패: {resource_url}, {e}")
+        return None, None
+
+def inline_css_url_assets(css_text, css_url, page_url):
+    def replace_url(match):
+        raw_value = match.group(1).strip()
+        asset_url = raw_value.strip("\"'")
+
+        if (
+            not asset_url
+            or asset_url.startswith("data:")
+            or asset_url.startswith("#")
+            or asset_url.lower().startswith("javascript:")
+        ):
+            return match.group(0)
+
+        data_uri = download_and_convert_to_base64(asset_url, css_url or page_url)
+        if not data_uri:
+            return match.group(0)
+
+        return f"url({data_uri})"
+
+    return re.sub(r"url\(([^)]+)\)", replace_url, css_text)
+
+def inline_stylesheets(soup, page_url):
+    print("🎨 CSS 인라인 처리 중...")
+    for link in list(soup.find_all("link")):
+        rel_values = [value.lower() for value in link.get("rel", [])]
+        href = link.get("href")
+
+        if "stylesheet" not in rel_values or not href:
+            continue
+
+        css_text, css_url = download_text_resource(href, page_url)
+        if not css_text:
+            link["href"] = urljoin(page_url, href)
+            continue
+
+        css_text = inline_css_url_assets(css_text, css_url, page_url)
+        style_tag = soup.new_tag("style")
+        style_tag.string = css_text
+        link.replace_with(style_tag)
+        print(f"✅ CSS 인라인 완료: {href}")
+
+def rewrite_dropbox_media_links(html):
+    def replace_link(match):
+        url = match.group(0)
+        parsed_url = urlparse(url)
+        filename = os.path.basename(parsed_url.path)
+        ext = os.path.splitext(filename)[1].lower()
+
+        if ext in [".mp4", ".webm", ".mov"]:
+            return get_archive_media_url("videos", filename)
+        if ext in [".mp3", ".ogg", ".wav", ".m4a"]:
+            return get_archive_media_url("audio", filename)
+
+        return url
+
+    return re.sub(
+        r"https://www\.dropbox\.com/scl/fi/[^\s\"'<>]+",
+        replace_link,
+        html
+    )
+
+def rewrite_archive_media_origin_links(html):
+    return re.sub(
+        r"https?://[^/\"'<>]+/archive-media/",
+        "/archive-media/",
+        html
+    )
+
+def strip_archive_scripts(soup):
+    for script in soup.find_all("script"):
+        script.decompose()
+
+    for tag in soup.find_all(True):
+        for attr in list(tag.attrs):
+            if attr.lower().startswith("on"):
+                del tag.attrs[attr]
+
+    for anchor in soup.find_all("a"):
+        href = anchor.get("href", "")
+        if href.lower().startswith("javascript:"):
+            anchor["href"] = "#"
+
+def media_source_type(media_name, src):
+    lower_src = src.lower()
+    if media_name == "audio":
+        if ".ogg" in lower_src:
+            return "audio/ogg"
+        if ".wav" in lower_src:
+            return "audio/wav"
+        return "audio/mpeg"
+
+    if ".webm" in lower_src:
+        return "video/webm"
+    if ".mov" in lower_src:
+        return "video/quicktime"
+    return "video/mp4"
+
+def insert_native_media_blocks(soup):
+    seen_sources = set()
+
+    for media in list(soup.find_all(["video", "audio"])):
+        media_src = media.get("src")
+        if not media_src:
+            first_source = media.find("source")
+            media_src = first_source.get("src") if first_source else None
+
+        if not media_src or media_src in seen_sources:
+            continue
+
+        seen_sources.add(media_src)
+
+        wrapper = soup.new_tag("div")
+        wrapper["class"] = "archive-native-media"
+
+        clean_media = soup.new_tag(media.name)
+        clean_media["controls"] = ""
+        clean_media["preload"] = "metadata"
+        clean_media["playsinline"] = ""
+        clean_media["src"] = media_src
+        clean_media["style"] = "width:100%;height:auto;background:#000;"
+
+        poster = media.get("poster")
+        if poster:
+            clean_media["poster"] = poster
+
+        source = soup.new_tag("source", src=media_src)
+        source["type"] = media_source_type(media.name, media_src)
+        clean_media.append(source)
+        wrapper.append(clean_media)
+
+        link = soup.new_tag("a", href=media_src, target="_blank", rel="noopener")
+        link["class"] = "archive-media-link"
+        link.string = "영상 파일 열기" if media.name == "video" else "오디오 파일 열기"
+        wrapper.append(link)
+
+        target = media.find_parent(class_="auto_media_wrapper") or media.find_parent(class_="mejs__container") or media
+        target.insert_before(wrapper)
+
+        if target is not media:
+            target["class"] = target.get("class", []) + ["archive-original-media-hidden"]
+        else:
+            media["class"] = media.get("class", []) + ["archive-original-media-hidden"]
+
+def add_archive_media_fallbacks(soup):
+    strip_archive_scripts(soup)
+    insert_native_media_blocks(soup)
+
+    style = soup.new_tag("style")
+    style.string = """
+      .archive-original-media-hidden,
+      .mejs__container,
+      .mejs__controls,
+      .mejs__mediaelement,
+      .mejs__overlay,
+      .mejs__poster,
+      .video-poster {
+        display: none !important;
+      }
+
+      video,
+      audio {
+        max-width: 100% !important;
+        height: auto !important;
+        position: relative !important;
+        z-index: 2 !important;
+        background: #000 !important;
+      }
+
+      .archive-media-link {
+        display: inline-block;
+        margin: 8px 0 16px;
+        padding: 8px 10px;
+        border-radius: 6px;
+        background: #111827;
+        color: #fff !important;
+        font-size: 14px;
+        text-decoration: none;
+      }
+
+      .archive-native-media {
+        margin: 0 0 16px;
+      }
+    """
+
+    if soup.head:
+        soup.head.append(style)
+    else:
+        soup.insert(0, style)
+
+    for media in soup.find_all(["video", "audio"]):
+        media["controls"] = ""
+        media["preload"] = "metadata"
+        media["playsinline"] = ""
+        media.attrs.pop("autoplay", None)
+        media.attrs.pop("data-autoplay", None)
+
+        media_src = media.get("src")
+        if media_src and not media.find("source"):
+            source = soup.new_tag("source", src=media_src)
+            source["type"] = "video/mp4" if media.name == "video" else "audio/mpeg"
+            media.append(source)
+
+        for source in media.find_all("source"):
+            source_src = source.get("src", "")
+            if source_src.endswith(".mp4") or ".mp4?" in source_src:
+                source["type"] = "video/mp4"
+            elif source_src.endswith(".webm") or ".webm?" in source_src:
+                source["type"] = "video/webm"
+            elif source_src.endswith(".mp3") or ".mp3?" in source_src:
+                source["type"] = "audio/mpeg"
+            elif source_src.endswith(".ogg") or ".ogg?" in source_src:
+                source["type"] = "audio/ogg"
+
+        link_src = media.get("src")
+        if not link_src:
+            first_source = media.find("source")
+            link_src = first_source.get("src") if first_source else None
+
+        if link_src and not media.find_next_sibling("a", class_="archive-media-link"):
+            link = soup.new_tag("a", href=link_src, target="_blank", rel="noopener")
+            link["class"] = "archive-media-link"
+            link.string = "영상 파일 열기" if media.name == "video" else "오디오 파일 열기"
+            media.insert_after(link)
+
 def download_and_save_media(media_url, base_url, media_type="media", use_base64=True):
     """
     미디어 파일을 다운로드하고 처리합니다.
@@ -211,16 +562,13 @@ def download_and_save_media(media_url, base_url, media_type="media", use_base64=
                     mode=dropbox.files.WriteMode.overwrite
                 )
             
-            # 공유 링크 생성 (미디어 파일이므로 raw=1 사용)
-            shared_link = get_shared_link(dropbox_path, use_raw=True)
-            
             # 임시 파일 삭제
             try:
                 os.remove(temp_path)
             except:
                 pass
             
-            return shared_link
+            return get_archive_media_url(media_type, filename)
         except Exception as e:
             print(f"❌ 미디어 다운로드 실패 ({media_type}): {media_url}, {e}")
             return None
@@ -237,6 +585,14 @@ def save_html_direct():
 
         if not url or not collection_id:
             return jsonify({"error": "Missing fields"}), 400
+
+        provided_html = html
+        if USE_PLAYWRIGHT_CAPTURE:
+            try:
+                html = render_page_html_with_playwright(url)
+            except Exception as e:
+                print(f"⚠️ Playwright 캡처 실패, 기존 HTML/fetch 방식으로 저장합니다: {e}")
+                html = provided_html
 
         if not html:
             print("HTML 본문 없음, 서버에서 페이지를 가져옵니다.")
@@ -261,6 +617,8 @@ def save_html_direct():
             for node in soup.find_all(tag):
                 if node.has_attr(attr):
                     node[attr] = urljoin(url, node[attr])
+
+        inline_stylesheets(soup, url)
 
         # 모든 이미지 다운로드 및 저장 (GIF 포함)
         print("🖼️ 이미지 처리 중...")
@@ -436,6 +794,8 @@ def save_html_direct():
                     if srcset_parts:
                         source["srcset"] = ", ".join(srcset_parts)
 
+        add_archive_media_fallbacks(soup)
+
         with open(filepath, "w", encoding="utf-8") as f:
             f.write(str(soup))
 
@@ -543,12 +903,28 @@ def view_archive(archive_id):
         dropbox_path = f"/web-archives/{filename}"
         _, response = get_dropbox_client().files_download(dropbox_path)
         html = response.content.decode("utf-8", errors="replace")
+        html = rewrite_dropbox_media_links(html)
+        html = rewrite_archive_media_origin_links(html)
+        soup = BeautifulSoup(html, "html.parser")
+        add_archive_media_fallbacks(soup)
+        html = str(soup)
 
         return Response(
             html,
             content_type="text/html; charset=utf-8",
             headers={
                 "Cache-Control": "private, max-age=300",
+                "Content-Security-Policy": (
+                    "default-src 'self' data: blob:; "
+                    "script-src 'none'; "
+                    "style-src 'self' 'unsafe-inline' data: https:; "
+                    "img-src 'self' data: blob: https:; "
+                    "media-src 'self' data: blob:; "
+                    "font-src 'self' data: https:; "
+                    "frame-src 'none'; "
+                    "object-src 'none'; "
+                    "base-uri 'self'"
+                ),
                 "X-Robots-Tag": "noindex, nofollow"
             }
         )
@@ -557,6 +933,70 @@ def view_archive(archive_id):
     except Exception as e:
         print(f"아카이브 로드 실패: {archive_id}, {e}")
         return Response("Archive not found", status=404, mimetype="text/plain")
+
+@app.route("/archive-media/<media_type>/<path:filename>")
+def view_archive_media(media_type, filename):
+    try:
+        if media_type not in ["videos", "audio", "images", "media"]:
+            raise ValueError("Invalid media type")
+
+        safe_filename = normalize_media_filename(filename)
+        dropbox_path = f"/web-archives/{media_type}/{safe_filename}"
+        _, response = get_dropbox_client().files_download(dropbox_path)
+        content = response.content
+        content_type = mimetypes.guess_type(safe_filename)[0] or "application/octet-stream"
+
+        range_header = request.headers.get("Range")
+        if range_header:
+            match = re.match(r"bytes=(\d*)-(\d*)", range_header)
+            if match:
+                start_text, end_text = match.groups()
+                if start_text:
+                    start = int(start_text)
+                    end = int(end_text) if end_text else len(content) - 1
+                else:
+                    suffix_length = int(end_text) if end_text else len(content)
+                    start = max(len(content) - suffix_length, 0)
+                    end = len(content) - 1
+
+                end = min(end, len(content) - 1)
+
+                if start <= end:
+                    partial = content[start:end + 1]
+                    return Response(
+                        partial,
+                        status=206,
+                        content_type=content_type,
+                        headers={
+                            "Accept-Ranges": "bytes",
+                            "Content-Range": f"bytes {start}-{end}/{len(content)}",
+                            "Content-Length": str(len(partial)),
+                            "Cache-Control": "private, max-age=86400"
+                        }
+                    )
+
+                return Response(
+                    status=416,
+                    headers={
+                        "Content-Range": f"bytes */{len(content)}",
+                        "Accept-Ranges": "bytes"
+                    }
+                )
+
+        return Response(
+            content,
+            content_type=content_type,
+            headers={
+                "Accept-Ranges": "bytes",
+                "Content-Length": str(len(content)),
+                "Cache-Control": "private, max-age=86400"
+            }
+        )
+    except ValueError as e:
+        return Response(str(e), status=400, mimetype="text/plain")
+    except Exception as e:
+        print(f"아카이브 미디어 로드 실패: {media_type}/{filename}, {e}")
+        return Response("Archive media not found", status=404, mimetype="text/plain")
 
 @app.route("/")
 def index():

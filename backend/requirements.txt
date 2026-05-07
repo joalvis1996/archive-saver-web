@@ -3,3 +3,4 @@ gunicorn
 dropbox
 requests
 beautifulsoup4
+playwright==1.51.0
