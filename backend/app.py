@@ -1,7 +1,7 @@
 from flask import Flask, request, jsonify, send_from_directory, Response
 import dropbox
 from bs4 import BeautifulSoup
-from urllib.parse import urlparse, urljoin, unquote, parse_qs
+from urllib.parse import urlparse, urljoin, unquote, parse_qs, quote
 import os
 import time
 import requests
@@ -33,6 +33,11 @@ def extract_cover_image(soup, base_url):
     if link and link.get("href"):
         return urljoin(base_url, link["href"])
     return None
+
+def get_request_origin():
+    scheme = request.headers.get("X-Forwarded-Proto", request.scheme).split(",")[0].strip()
+    host = request.headers.get("X-Forwarded-Host", request.host).split(",")[0].strip()
+    return f"{scheme}://{host}"
 
 def get_dropbox_client():
     return dropbox.Dropbox(
@@ -77,6 +82,22 @@ def generate_filename(parsed):
     else:
         last_segment = parsed.path.strip("/").replace("/", "_") or "index"
         return f"{parsed.netloc}_{last_segment}.html"
+
+def get_archive_id(filename):
+    return filename[:-5] if filename.endswith(".html") else filename
+
+def get_archive_url(filename):
+    archive_id = quote(get_archive_id(filename), safe="")
+    return f"{get_request_origin()}/archive/{archive_id}"
+
+def normalize_archive_filename(archive_id):
+    decoded_id = unquote(archive_id).strip()
+    filename = decoded_id if decoded_id.endswith(".html") else f"{decoded_id}.html"
+
+    if not filename or filename != os.path.basename(filename) or ".." in filename:
+        raise ValueError("Invalid archive id")
+
+    return filename
 
 def fetch_page_html(url):
     headers = {
@@ -423,7 +444,8 @@ def save_html_direct():
         with open(filepath, "rb") as f:
             dbx.files_upload(f.read(), dropbox_path, mode=dropbox.files.WriteMode.overwrite)
 
-        # HTML 파일은 일반 공유 링크 사용 (raw=1 사용 안 함)
+        archive_url = get_archive_url(filename)
+        # Dropbox 링크는 백업용으로 유지하고, Raindrop에는 Archive Saver 뷰어 URL을 저장합니다.
         shared_url = get_shared_link(dropbox_path, use_raw=False)
         title = soup.title.string.strip() if soup.title else "Untitled"
         domain_tag = parsed.netloc
@@ -434,9 +456,10 @@ def save_html_direct():
             "Content-Type": "application/json"
         }
         payload = {
-            "link": shared_url,
+            "link": archive_url,
             "title": title,
             "excerpt": url,
+            "note": f"Original URL: {url}\nDropbox backup: {shared_url}",
             "tags": [domain_tag],
             "collection": {"$id": collection_id}
         }
@@ -445,7 +468,10 @@ def save_html_direct():
 
         r = requests.post("https://api.raindrop.io/rest/v1/raindrop", headers=raindrop_headers, json=payload)
         if r.status_code == 200:
-            return jsonify({"message": "저장 완료!"})
+            return jsonify({
+                "message": "저장 완료!",
+                "archiveUrl": archive_url
+            })
         else:
             return jsonify({"error": f"Raindrop 저장 실패: {r.status_code}"}), 500
 
@@ -465,9 +491,7 @@ def get_collections():
 
 @app.route("/manifest.webmanifest")
 def manifest():
-    scheme = request.headers.get("X-Forwarded-Proto", request.scheme).split(",")[0].strip()
-    host = request.headers.get("X-Forwarded-Host", request.host).split(",")[0].strip()
-    origin = f"{scheme}://{host}"
+    origin = get_request_origin()
     payload = {
         "name": "Archive Saver",
         "short_name": "Archive",
@@ -511,6 +535,28 @@ def manifest():
         json.dumps(payload, ensure_ascii=False),
         mimetype="application/manifest+json"
     )
+
+@app.route("/archive/<path:archive_id>")
+def view_archive(archive_id):
+    try:
+        filename = normalize_archive_filename(archive_id)
+        dropbox_path = f"/web-archives/{filename}"
+        _, response = get_dropbox_client().files_download(dropbox_path)
+        html = response.content.decode("utf-8", errors="replace")
+
+        return Response(
+            html,
+            content_type="text/html; charset=utf-8",
+            headers={
+                "Cache-Control": "private, max-age=300",
+                "X-Robots-Tag": "noindex, nofollow"
+            }
+        )
+    except ValueError as e:
+        return Response(str(e), status=400, mimetype="text/plain")
+    except Exception as e:
+        print(f"아카이브 로드 실패: {archive_id}, {e}")
+        return Response("Archive not found", status=404, mimetype="text/plain")
 
 @app.route("/")
 def index():
