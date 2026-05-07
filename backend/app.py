@@ -180,13 +180,26 @@ def is_security_challenge_html(html):
     if not html:
         return False
 
-    security_markers = [
-        "에펨코리아 보안 시스템",
-        "사람인지 확인이 완료되면",
-        "수동 접속 갱신",
-        "help@fmkorea.com"
-    ]
-    return any(marker in html for marker in security_markers)
+    try:
+        soup = BeautifulSoup(html, "html.parser")
+        title_text = soup.title.get_text(" ", strip=True) if soup.title else ""
+        body_text = soup.body.get_text(" ", strip=True) if soup.body else soup.get_text(" ", strip=True)
+        condensed_text = " ".join(body_text.split())
+
+        if "에펨코리아 보안 시스템" in title_text:
+            return True
+
+        required_markers = [
+            "에펨코리아 보안 시스템",
+            "사람인지 확인이 완료되면",
+            "수동 접속 갱신",
+        ]
+        marker_hits = sum(marker in condensed_text for marker in required_markers)
+        has_help_email = "help@fmkorea.com" in condensed_text
+
+        return marker_hits >= 2 and has_help_email
+    except Exception:
+        return False
 
 def security_challenge_response():
     return jsonify({
