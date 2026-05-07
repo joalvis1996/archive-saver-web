@@ -741,82 +741,65 @@ def save_html_direct():
                     node[attr] = urljoin(url, node[attr])
         log_save_phase("상대 URL 절대화", html_parse_started_at)
 
-        stylesheet_started_at = time.perf_counter()
-        inline_stylesheets(soup, url)
-        log_save_phase("스타일시트 인라인", stylesheet_started_at)
-
-        # 모든 이미지 다운로드 및 저장 (GIF 포함)
-        print("🖼️ 이미지 처리 중...")
-        image_started_at = time.perf_counter()
-        image_saved_count = 0
-        for img in soup.find_all("img"):
-            # src 속성 처리
-            img_src = img.get("src")
-            if img_src:
-                # GIF 파일인 경우 images 폴더에 저장
-                img_src_lower = img_src.lower()
-                is_gif = img_src_lower.endswith(".gif") or "gif" in img_src_lower
-                media_type = "images"
-                
-                shared_link = download_and_save_media(img_src, url, media_type)
-                if shared_link:
-                    img["src"] = shared_link
-                    image_saved_count += 1
-                    print(f"✅ 이미지 저장 완료: {img_src}")
-            
-            # 지연 로딩 속성 처리 (data-src, data-lazy-src 등)
-            for lazy_attr in ["data-src", "data-lazy-src", "data-original", "data-url"]:
-                lazy_src = img.get(lazy_attr)
-                if lazy_src:
-                    # 절대 URL로 변환
-                    full_lazy_url = urljoin(url, lazy_src)
-                    lazy_src_lower = full_lazy_url.lower()
-                    is_gif = lazy_src_lower.endswith(".gif") or "gif" in lazy_src_lower
-                    media_type = "images"
-                    
-                    shared_link = download_and_save_media(lazy_src, url, media_type)
-                    if shared_link:
-                        img[lazy_attr] = shared_link
-                        # 지연 로딩 속성이 있고 src가 없으면 src에도 설정
-                        if not img.get("src"):
-                            img["src"] = shared_link
-                        image_saved_count += 1
-                        print(f"✅ 지연 로딩 이미지 저장 완료 ({lazy_attr}): {lazy_src}")
-            
-            # img 태그의 srcset 속성 처리 (반응형 이미지)
-            img_srcset = img.get("srcset")
-            if img_srcset:
-                srcset_parts = []
-                for part in img_srcset.split(","):
-                    part = part.strip()
-                    if not part:
-                        continue
-                    # URL과 descriptor 분리
-                    parts = part.split()
-                    if parts:
-                        image_url = parts[0]
-                        descriptor = " ".join(parts[1:]) if len(parts) > 1 else ""
-                        
-                        shared_link = download_and_save_media(image_url, url, "images")
-                        if shared_link:
-                            if descriptor:
-                                srcset_parts.append(f"{shared_link} {descriptor}")
-                            else:
-                                srcset_parts.append(shared_link)
-                            image_saved_count += 1
-                            print(f"✅ img srcset 이미지 저장 완료: {image_url}")
-                        else:
-                            # 실패한 경우 원본 유지
-                            srcset_parts.append(part)
-                
-                if srcset_parts:
-                    img["srcset"] = ", ".join(srcset_parts)
-        print(f"ℹ️ 이미지 저장 수: {image_saved_count}")
-        log_save_phase("이미지 처리", image_started_at)
-
         if lightweight_capture_mode:
-            print("⚡ android-webview 경량 모드: 비디오/오디오 다운로드는 건너뜁니다.")
+            print("⚡ android-webview 경량 모드: CSS/이미지/비디오/오디오 다운로드를 건너뜁니다.")
         else:
+            stylesheet_started_at = time.perf_counter()
+            inline_stylesheets(soup, url)
+            log_save_phase("스타일시트 인라인", stylesheet_started_at)
+
+            # 모든 이미지 다운로드 및 저장 (GIF 포함)
+            print("🖼️ 이미지 처리 중...")
+            image_started_at = time.perf_counter()
+            image_saved_count = 0
+            for img in soup.find_all("img"):
+                img_src = img.get("src")
+                if img_src:
+                    shared_link = download_and_save_media(img_src, url, "images")
+                    if shared_link:
+                        img["src"] = shared_link
+                        image_saved_count += 1
+                        print(f"✅ 이미지 저장 완료: {img_src}")
+                
+                for lazy_attr in ["data-src", "data-lazy-src", "data-original", "data-url"]:
+                    lazy_src = img.get(lazy_attr)
+                    if lazy_src:
+                        shared_link = download_and_save_media(lazy_src, url, "images")
+                        if shared_link:
+                            img[lazy_attr] = shared_link
+                            if not img.get("src"):
+                                img["src"] = shared_link
+                            image_saved_count += 1
+                            print(f"✅ 지연 로딩 이미지 저장 완료 ({lazy_attr}): {lazy_src}")
+                
+                img_srcset = img.get("srcset")
+                if img_srcset:
+                    srcset_parts = []
+                    for part in img_srcset.split(","):
+                        part = part.strip()
+                        if not part:
+                            continue
+                        parts = part.split()
+                        if parts:
+                            image_url = parts[0]
+                            descriptor = " ".join(parts[1:]) if len(parts) > 1 else ""
+                            
+                            shared_link = download_and_save_media(image_url, url, "images")
+                            if shared_link:
+                                if descriptor:
+                                    srcset_parts.append(f"{shared_link} {descriptor}")
+                                else:
+                                    srcset_parts.append(shared_link)
+                                image_saved_count += 1
+                                print(f"✅ img srcset 이미지 저장 완료: {image_url}")
+                            else:
+                                srcset_parts.append(part)
+                    
+                    if srcset_parts:
+                        img["srcset"] = ", ".join(srcset_parts)
+            print(f"ℹ️ 이미지 저장 수: {image_saved_count}")
+            log_save_phase("이미지 처리", image_started_at)
+
             video_started_at = time.perf_counter()
             video_saved_count = 0
             audio_saved_count = 0
@@ -897,40 +880,36 @@ def save_html_direct():
             print(f"ℹ️ 비디오 저장 수: {video_saved_count}, 오디오 저장 수: {audio_saved_count}")
             log_save_phase("비디오/오디오 처리", video_started_at)
 
-        # picture > source 태그 처리 (반응형 이미지)
-        print("🖼️ picture > source 태그 처리 중...")
-        picture_started_at = time.perf_counter()
-        for picture in soup.find_all("picture"):
-            for source in picture.find_all("source"):
-                source_srcset = source.get("srcset")
-                if source_srcset:
-                    # srcset은 여러 이미지를 포함할 수 있음 (예: "image1.jpg 1x, image2.jpg 2x")
-                    # 모든 이미지를 처리
-                    srcset_parts = []
-                    for part in source_srcset.split(","):
-                        part = part.strip()
-                        if not part:
-                            continue
-                        # URL과 descriptor 분리 (예: "image.jpg 1x" -> ["image.jpg", "1x"])
-                        parts = part.split()
-                        if parts:
-                            image_url = parts[0]
-                            descriptor = " ".join(parts[1:]) if len(parts) > 1 else ""
-                            
-                            shared_link = download_and_save_media(image_url, url, "images")
-                            if shared_link:
-                                if descriptor:
-                                    srcset_parts.append(f"{shared_link} {descriptor}")
+        if not lightweight_capture_mode:
+            print("🖼️ picture > source 태그 처리 중...")
+            picture_started_at = time.perf_counter()
+            for picture in soup.find_all("picture"):
+                for source in picture.find_all("source"):
+                    source_srcset = source.get("srcset")
+                    if source_srcset:
+                        srcset_parts = []
+                        for part in source_srcset.split(","):
+                            part = part.strip()
+                            if not part:
+                                continue
+                            parts = part.split()
+                            if parts:
+                                image_url = parts[0]
+                                descriptor = " ".join(parts[1:]) if len(parts) > 1 else ""
+                                
+                                shared_link = download_and_save_media(image_url, url, "images")
+                                if shared_link:
+                                    if descriptor:
+                                        srcset_parts.append(f"{shared_link} {descriptor}")
+                                    else:
+                                        srcset_parts.append(shared_link)
+                                    print(f"✅ picture 소스 저장 완료: {image_url}")
                                 else:
-                                    srcset_parts.append(shared_link)
-                                print(f"✅ picture 소스 저장 완료: {image_url}")
-                            else:
-                                # 실패한 경우 원본 유지
-                                srcset_parts.append(part)
-                    
-                    if srcset_parts:
-                        source["srcset"] = ", ".join(srcset_parts)
-        log_save_phase("picture/source 처리", picture_started_at)
+                                    srcset_parts.append(part)
+                        
+                        if srcset_parts:
+                            source["srcset"] = ", ".join(srcset_parts)
+            log_save_phase("picture/source 처리", picture_started_at)
 
         fallback_started_at = time.perf_counter()
         add_archive_media_fallbacks(soup)
