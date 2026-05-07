@@ -132,6 +132,28 @@ def fetch_page_html(url):
     response.raise_for_status()
     return response.text
 
+def is_security_challenge_html(html):
+    if not html:
+        return False
+
+    security_markers = [
+        "에펨코리아 보안 시스템",
+        "사람인지 확인이 완료되면",
+        "수동 접속 갱신",
+        "help@fmkorea.com"
+    ]
+    return any(marker in html for marker in security_markers)
+
+def security_challenge_response():
+    return jsonify({
+        "error": (
+            "FMKorea가 Render 서버 IP를 보안 확인 페이지로 차단했습니다. "
+            "보안 페이지는 아카이브로 저장하지 않았습니다. "
+            "이 경우 서버가 대신 접속하는 방식으로는 원문/영상 저장이 어렵고, "
+            "휴대폰 브라우저에서 열린 페이지 내용을 직접 보내는 방식이 필요합니다."
+        )
+    }), 409
+
 def render_page_html_with_playwright(url):
     from playwright.sync_api import sync_playwright
 
@@ -586,10 +608,21 @@ def save_html_direct():
         if not url or not collection_id:
             return jsonify({"error": "Missing fields"}), 400
 
+        if is_security_challenge_html(html):
+            print("⚠️ 제공된 HTML이 FMKorea 보안 페이지입니다.")
+            return security_challenge_response()
+
         provided_html = html
-        if USE_PLAYWRIGHT_CAPTURE:
+        html = provided_html
+
+        if not html and USE_PLAYWRIGHT_CAPTURE:
             try:
-                html = render_page_html_with_playwright(url)
+                captured_html = render_page_html_with_playwright(url)
+                if is_security_challenge_html(captured_html):
+                    print("⚠️ Playwright 캡처가 FMKorea 보안 페이지로 차단되었습니다.")
+                    return security_challenge_response()
+                else:
+                    html = captured_html
             except Exception as e:
                 print(f"⚠️ Playwright 캡처 실패, 기존 HTML/fetch 방식으로 저장합니다: {e}")
                 html = provided_html
@@ -597,6 +630,10 @@ def save_html_direct():
         if not html:
             print("HTML 본문 없음, 서버에서 페이지를 가져옵니다.")
             html = fetch_page_html(url)
+
+        if is_security_challenge_html(html):
+            print("⚠️ FMKorea 보안 페이지 감지: 저장을 중단합니다.")
+            return security_challenge_response()
 
         parsed = urlparse(url)
         filename = generate_filename(parsed)

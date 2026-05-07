@@ -155,7 +155,8 @@ function App() {
       setProgress(100);
       setStatus(res.data.message || '저장 성공!');
     } catch (err) {
-      setStatus('저장 실패: ' + err.message);
+      const apiMessage = err.response?.data?.error;
+      setStatus('저장 실패: ' + (apiMessage || err.message));
     } finally {
       setIsSaving(false);
     }
