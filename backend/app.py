@@ -9,6 +9,7 @@ import base64
 import json
 import re
 import mimetypes
+from uuid import uuid4
 
 app = Flask(__name__, static_folder="../frontend/dist", static_url_path="/_static")
 
@@ -47,7 +48,7 @@ def is_allowed_cors_origin(origin):
 
 @app.after_request
 def add_api_cors_headers(response):
-    if request.path != "/api/save-html":
+    if request.path not in ["/api/save-html", "/api/upload-media"]:
         return response
 
     origin = request.headers.get("Origin")
@@ -161,6 +162,44 @@ def normalize_media_filename(filename):
 
 def get_archive_media_url(media_type, filename):
     return f"/archive-media/{media_type}/{quote(filename, safe='')}"
+
+def infer_extension(filename, content_type, media_type):
+    if filename:
+        ext = os.path.splitext(filename)[1].lower()
+        if ext:
+            return ext
+
+    guessed_ext = mimetypes.guess_extension(content_type or "")
+    if guessed_ext:
+        return guessed_ext
+
+    fallback_extensions = {
+        "images": ".jpg",
+        "videos": ".mp4",
+        "audio": ".mp3",
+        "media": ".bin",
+    }
+    return fallback_extensions.get(media_type, ".bin")
+
+def build_media_filename(media_type, source_url="", original_filename="", content_type=""):
+    parsed_source = urlparse(source_url or "")
+    source_name = os.path.basename(parsed_source.path)
+    base_name = os.path.splitext(original_filename or source_name)[0]
+    safe_base = re.sub(r"[^A-Za-z0-9._-]+", "_", base_name).strip("._-")
+    if not safe_base:
+        safe_base = media_type.rstrip("s") or "media"
+
+    ext = infer_extension(original_filename or source_name, content_type, media_type)
+    return f"{safe_base}_{uuid4().hex[:12]}{ext}"
+
+def upload_media_bytes(media_bytes, media_type, filename):
+    dropbox_path = f"/web-archives/{media_type}/{filename}"
+    get_dropbox_client().files_upload(
+        media_bytes,
+        dropbox_path,
+        mode=dropbox.files.WriteMode.overwrite
+    )
+    return get_archive_media_url(media_type, filename)
 
 def fetch_page_html(url):
     headers = {
@@ -618,36 +657,21 @@ def download_and_save_media(media_url, base_url, media_type="media", use_base64=
             parsed_url = urlparse(full_url)
             
             # 파일명 추출
-            filename = os.path.basename(parsed_url.path)
-            if not filename or '.' not in filename:
-                filename = f"media_{hash(full_url) % 100000}.{parsed_url.path.split('.')[-1] if '.' in parsed_url.path else 'bin'}"
+            original_filename = os.path.basename(parsed_url.path)
             
             # 파일 다운로드
             response = requests.get(full_url, headers={"Referer": base_url}, timeout=30, stream=True)
             response.raise_for_status()
             
-            # 임시 파일로 저장
-            temp_path = f"/tmp/{filename}"
-            with open(temp_path, "wb") as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    f.write(chunk)
+            media_bytes = b"".join(response.iter_content(chunk_size=8192))
+            filename = build_media_filename(
+                media_type,
+                source_url=full_url,
+                original_filename=original_filename,
+                content_type=response.headers.get("Content-Type", "")
+            )
             
-            # Dropbox에 업로드
-            dropbox_path = f"/web-archives/{media_type}/{filename}"
-            with open(temp_path, "rb") as f:
-                get_dropbox_client().files_upload(
-                    f.read(), 
-                    dropbox_path, 
-                    mode=dropbox.files.WriteMode.overwrite
-                )
-            
-            # 임시 파일 삭제
-            try:
-                os.remove(temp_path)
-            except:
-                pass
-            
-            return get_archive_media_url(media_type, filename)
+            return upload_media_bytes(media_bytes, media_type, filename)
         except Exception as e:
             print(f"❌ 미디어 다운로드 실패 ({media_type}): {media_url}, {e}")
             return None
@@ -655,6 +679,36 @@ def download_and_save_media(media_url, base_url, media_type="media", use_base64=
 def log_save_phase(label, started_at):
     elapsed = time.perf_counter() - started_at
     print(f"⏱️ {label}: {elapsed:.2f}s")
+
+@app.route("/api/upload-media", methods=["POST"])
+def upload_media_direct():
+    try:
+        media_type = request.form.get("mediaType", "media")
+        if media_type not in ["videos", "audio", "images", "media"]:
+            return jsonify({"error": "Invalid media type"}), 400
+
+        uploaded_file = request.files.get("file")
+        if not uploaded_file or not uploaded_file.filename:
+            return jsonify({"error": "Missing media file"}), 400
+
+        source_url = request.form.get("sourceUrl", "")
+        content_type = uploaded_file.mimetype or request.form.get("contentType", "")
+        filename = build_media_filename(
+            media_type,
+            source_url=source_url,
+            original_filename=uploaded_file.filename,
+            content_type=content_type
+        )
+        archive_url = upload_media_bytes(uploaded_file.read(), media_type, filename)
+
+        return jsonify({
+            "message": "업로드 완료",
+            "url": archive_url,
+            "filename": filename,
+        })
+    except Exception as e:
+        print(f"아카이브 미디어 업로드 실패: {e}")
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/save-html", methods=["POST"])

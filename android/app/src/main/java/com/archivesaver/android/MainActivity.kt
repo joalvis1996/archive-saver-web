@@ -18,8 +18,12 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.webkit.WebSettingsCompat
 import androidx.webkit.WebViewFeature
 import com.archivesaver.android.databinding.ActivityMainBinding
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedReader
+import java.io.File
+import java.io.FileOutputStream
+import java.io.OutputStream
 import java.io.OutputStreamWriter
 import java.net.HttpURLConnection
 import java.net.URL
@@ -27,6 +31,11 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
 class MainActivity : AppCompatActivity() {
+
+    data class MediaCandidate(
+        val sourceUrl: String,
+        val mediaType: String
+    )
 
     private lateinit var binding: ActivityMainBinding
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -177,43 +186,107 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun performArchiveRequest(url: String, html: String): Pair<Int, String> {
+        val endpoint = URL("${BuildConfig.ARCHIVE_API_BASE_URL}/api/save-html")
+        val body = JSONObject().apply {
+            put("url", url)
+            put("html", html)
+            put("collectionTitle", BuildConfig.DEFAULT_COLLECTION_TITLE)
+            put("clientCaptureMode", "android-webview")
+        }
+
+        val connection = (endpoint.openConnection() as HttpURLConnection).apply {
+            requestMethod = "POST"
+            connectTimeout = 30_000
+            readTimeout = 60_000
+            doOutput = true
+            setRequestProperty("Content-Type", "application/json; charset=utf-8")
+            setRequestProperty("Accept", "application/json")
+        }
+
+        OutputStreamWriter(connection.outputStream, Charsets.UTF_8).use { writer ->
+            writer.write(body.toString())
+        }
+
+        val responseCode = connection.responseCode
+        val responseText = (
+            if (responseCode in 200..299) connection.inputStream else connection.errorStream
+        )?.bufferedReader()?.use(BufferedReader::readText).orEmpty()
+
+        val responseJson = responseText.takeIf { it.isNotBlank() }?.let(::JSONObject)
+        val archiveUrl = responseJson?.optString("archiveUrl").orEmpty()
+        val message = responseJson?.optString("message")
+            ?.takeIf { it.isNotBlank() }
+            ?: responseJson?.optString("error")?.takeIf { it.isNotBlank() }
+            ?: "HTTP $responseCode"
+
+        return responseCode to if (archiveUrl.isBlank()) message else "$message\n$archiveUrl"
+    }
+
     private fun postArchiveRequest(url: String, html: String) {
         networkExecutor.execute {
+            val result = runCatching { performArchiveRequest(url, html) }
+
+            mainHandler.post {
+                val (code, message) = result.getOrElse { -1 to (it.message ?: "알 수 없는 오류") }
+                if (code in 200..299) {
+                    binding.progressBar.progress = 100
+                    updateStatus(message)
+                } else {
+                    finishSaveWithError(message)
+                    return@post
+                }
+                isSaving = false
+                setButtonsEnabled(true)
+                currentCaptureUrl = null
+                htmlCaptureBuffer.setLength(0)
+            }
+        }
+    }
+
+    private fun collectMediaCandidatesAndSave(pageUrl: String, html: String) {
+        updateStatus("영상/GIF 링크를 추출하는 중...")
+        binding.progressBar.progress = 72
+        binding.webView.evaluateJavascript(MEDIA_CANDIDATES_SCRIPT) { rawJson ->
+            val candidates = parseMediaCandidates(rawJson)
+            if (candidates.isEmpty()) {
+                updateStatus("캡처한 페이지를 서버에 저장하는 중...")
+                binding.progressBar.progress = 78
+                postArchiveRequest(pageUrl, html)
+                return@evaluateJavascript
+            }
+
+            uploadMediaCandidatesAndSave(pageUrl, html, candidates)
+        }
+    }
+
+    private fun uploadMediaCandidatesAndSave(
+        pageUrl: String,
+        html: String,
+        candidates: List<MediaCandidate>
+    ) {
+        networkExecutor.execute {
             val result = runCatching {
-                val endpoint = URL("${BuildConfig.ARCHIVE_API_BASE_URL}/api/save-html")
-                val body = JSONObject().apply {
-                    put("url", url)
-                    put("html", html)
-                    put("collectionTitle", BuildConfig.DEFAULT_COLLECTION_TITLE)
-                    put("clientCaptureMode", "android-webview")
+                val uniqueCandidates = candidates
+                    .filter { it.sourceUrl.isNotBlank() }
+                    .distinctBy { "${it.mediaType}:${it.sourceUrl}" }
+
+                var rewrittenHtml = html
+                val total = uniqueCandidates.size
+
+                uniqueCandidates.forEachIndexed { index, candidate ->
+                    mainHandler.post {
+                        updateStatus("미디어 업로드 중... ${index + 1}/$total")
+                        binding.progressBar.progress = 75 + ((index * 12) / maxOf(total, 1))
+                    }
+
+                    val tempFile = downloadMediaToTempFile(candidate, pageUrl)
+                    val uploadedUrl = uploadMediaFile(tempFile, candidate)
+                    rewrittenHtml = rewrittenHtml.replace(candidate.sourceUrl, uploadedUrl)
+                    tempFile.delete()
                 }
 
-                val connection = (endpoint.openConnection() as HttpURLConnection).apply {
-                    requestMethod = "POST"
-                    connectTimeout = 30_000
-                    readTimeout = 60_000
-                    doOutput = true
-                    setRequestProperty("Content-Type", "application/json; charset=utf-8")
-                    setRequestProperty("Accept", "application/json")
-                }
-
-                OutputStreamWriter(connection.outputStream, Charsets.UTF_8).use { writer ->
-                    writer.write(body.toString())
-                }
-
-                val responseCode = connection.responseCode
-                val responseText = (
-                    if (responseCode in 200..299) connection.inputStream else connection.errorStream
-                )?.bufferedReader()?.use(BufferedReader::readText).orEmpty()
-
-                val responseJson = responseText.takeIf { it.isNotBlank() }?.let(::JSONObject)
-                val archiveUrl = responseJson?.optString("archiveUrl").orEmpty()
-                val message = responseJson?.optString("message")
-                    ?.takeIf { it.isNotBlank() }
-                    ?: responseJson?.optString("error")?.takeIf { it.isNotBlank() }
-                    ?: "HTTP $responseCode"
-
-                responseCode to if (archiveUrl.isBlank()) message else "$message\n$archiveUrl"
+                performArchiveRequest(pageUrl, rewrittenHtml)
             }
 
             mainHandler.post {
@@ -282,9 +355,7 @@ class MainActivity : AppCompatActivity() {
                     return@post
                 }
 
-                updateStatus("캡처한 페이지를 서버에 저장하는 중...")
-                binding.progressBar.progress = 75
-                postArchiveRequest(url, html)
+                collectMediaCandidatesAndSave(url, html)
             }
         }
 
@@ -345,6 +416,173 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun decodeJavascriptString(raw: String?): String {
+        if (raw.isNullOrBlank() || raw == "null") {
+            return ""
+        }
+
+        return runCatching {
+            JSONArray("[$raw]").getString(0)
+        }.getOrDefault("")
+    }
+
+    private fun parseMediaCandidates(rawJson: String?): List<MediaCandidate> {
+        val json = decodeJavascriptString(rawJson)
+        if (json.isBlank()) {
+            return emptyList()
+        }
+
+        return runCatching {
+            val array = JSONArray(json)
+            buildList {
+                for (index in 0 until array.length()) {
+                    val item = array.optJSONObject(index) ?: continue
+                    val sourceUrl = item.optString("url")
+                    val mediaType = item.optString("mediaType")
+                    if (sourceUrl.isNotBlank() && mediaType.isNotBlank()) {
+                        add(MediaCandidate(sourceUrl, mediaType))
+                    }
+                }
+            }
+        }.getOrDefault(emptyList())
+    }
+
+    private fun downloadMediaToTempFile(candidate: MediaCandidate, refererUrl: String): File {
+        val connection = (URL(candidate.sourceUrl).openConnection() as HttpURLConnection).apply {
+            requestMethod = "GET"
+            connectTimeout = 30_000
+            readTimeout = 120_000
+            instanceFollowRedirects = true
+            setRequestProperty("Referer", refererUrl)
+            setRequestProperty(
+                "User-Agent",
+                "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Mobile Safari/537.36"
+            )
+        }
+        CookieManager.getInstance().getCookie(candidate.sourceUrl)?.takeIf { it.isNotBlank() }?.let {
+            connection.setRequestProperty("Cookie", it)
+        }
+
+        val responseCode = connection.responseCode
+        if (responseCode !in 200..299) {
+            throw IllegalStateException("미디어 다운로드 실패: HTTP $responseCode")
+        }
+
+        val extension = guessExtension(candidate.sourceUrl, connection.contentType, candidate.mediaType)
+        val tempFile = File.createTempFile("archive_${candidate.mediaType}_", extension, cacheDir)
+
+        connection.inputStream.use { input ->
+            FileOutputStream(tempFile).use { output ->
+                input.copyTo(output)
+            }
+        }
+
+        return tempFile
+    }
+
+    private fun uploadMediaFile(file: File, candidate: MediaCandidate): String {
+        val boundary = "----ArchiveSaver${System.currentTimeMillis()}"
+        val endpoint = URL("${BuildConfig.ARCHIVE_API_BASE_URL}/api/upload-media")
+        val connection = (endpoint.openConnection() as HttpURLConnection).apply {
+            requestMethod = "POST"
+            connectTimeout = 30_000
+            readTimeout = 120_000
+            doOutput = true
+            setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
+            setRequestProperty("Accept", "application/json")
+        }
+
+        connection.outputStream.use { output ->
+            writeFormField(output, boundary, "mediaType", candidate.mediaType)
+            writeFormField(output, boundary, "sourceUrl", candidate.sourceUrl)
+            writeFilePart(output, boundary, "file", file, guessContentType(file, candidate.mediaType))
+            output.write("--$boundary--\r\n".toByteArray())
+        }
+
+        val responseCode = connection.responseCode
+        val responseText = (
+            if (responseCode in 200..299) connection.inputStream else connection.errorStream
+        )?.bufferedReader()?.use(BufferedReader::readText).orEmpty()
+        val responseJson = responseText.takeIf { it.isNotBlank() }?.let(::JSONObject)
+
+        if (responseCode !in 200..299) {
+            throw IllegalStateException(
+                responseJson?.optString("error") ?: "미디어 업로드 실패: HTTP $responseCode"
+            )
+        }
+
+        val uploadedUrl = responseJson?.optString("url")?.takeIf { it.isNotBlank() }
+            ?: throw IllegalStateException("업로드 응답에 URL이 없습니다.")
+
+        return if (uploadedUrl.startsWith("/")) {
+            "${BuildConfig.ARCHIVE_API_BASE_URL}$uploadedUrl"
+        } else {
+            uploadedUrl
+        }
+    }
+
+    private fun writeFormField(output: OutputStream, boundary: String, name: String, value: String) {
+        output.write("--$boundary\r\n".toByteArray())
+        output.write("Content-Disposition: form-data; name=\"$name\"\r\n\r\n".toByteArray())
+        output.write(value.toByteArray(Charsets.UTF_8))
+        output.write("\r\n".toByteArray())
+    }
+
+    private fun writeFilePart(
+        output: OutputStream,
+        boundary: String,
+        fieldName: String,
+        file: File,
+        contentType: String
+    ) {
+        output.write("--$boundary\r\n".toByteArray())
+        output.write(
+            "Content-Disposition: form-data; name=\"$fieldName\"; filename=\"${file.name}\"\r\n".toByteArray()
+        )
+        output.write("Content-Type: $contentType\r\n\r\n".toByteArray())
+        file.inputStream().use { input ->
+            input.copyTo(output)
+        }
+        output.write("\r\n".toByteArray())
+    }
+
+    private fun guessExtension(sourceUrl: String, contentType: String?, mediaType: String): String {
+        val path = Uri.parse(sourceUrl).lastPathSegment.orEmpty()
+        val existingExt = path.substringAfterLast('.', "")
+        if (existingExt.isNotBlank()) {
+            return ".${existingExt.substringBefore('?')}"
+        }
+
+        val lowerType = contentType.orEmpty().lowercase()
+        return when {
+            "gif" in lowerType -> ".gif"
+            "webm" in lowerType -> ".webm"
+            "mpeg" in lowerType -> ".mp3"
+            "ogg" in lowerType -> ".ogg"
+            "png" in lowerType -> ".png"
+            "jpeg" in lowerType || "jpg" in lowerType -> ".jpg"
+            mediaType == "videos" -> ".mp4"
+            mediaType == "audio" -> ".mp3"
+            else -> ".bin"
+        }
+    }
+
+    private fun guessContentType(file: File, mediaType: String): String {
+        val lowerName = file.name.lowercase()
+        return when {
+            lowerName.endsWith(".gif") -> "image/gif"
+            lowerName.endsWith(".png") -> "image/png"
+            lowerName.endsWith(".jpg") || lowerName.endsWith(".jpeg") -> "image/jpeg"
+            lowerName.endsWith(".webm") -> "video/webm"
+            lowerName.endsWith(".mp4") -> "video/mp4"
+            lowerName.endsWith(".mp3") -> "audio/mpeg"
+            lowerName.endsWith(".ogg") -> "audio/ogg"
+            mediaType == "videos" -> "video/mp4"
+            mediaType == "audio" -> "audio/mpeg"
+            else -> "application/octet-stream"
+        }
+    }
+
     companion object {
         private const val PREPARE_PAGE_SCRIPT = """
             (async function() {
@@ -356,6 +594,9 @@ class MainActivity : AppCompatActivity() {
                     node.setAttribute('src', value);
                   }
                 });
+                if (node.src) {
+                  node.setAttribute('src', node.src);
+                }
                 const srcset = node.getAttribute('data-srcset');
                 if (srcset && !node.getAttribute('srcset')) {
                   node.setAttribute('srcset', srcset);
@@ -401,6 +642,51 @@ class MainActivity : AppCompatActivity() {
                 }
                 return false;
               }
+            })();
+        """
+
+        private const val MEDIA_CANDIDATES_SCRIPT = """
+            (function() {
+              const items = [];
+              const seen = new Set();
+              const pushItem = (url, mediaType) => {
+                if (!url || seen.has(mediaType + ':' + url)) {
+                  return;
+                }
+                seen.add(mediaType + ':' + url);
+                items.push({ url, mediaType });
+              };
+
+              document.querySelectorAll('video').forEach((video) => {
+                if (video.src) {
+                  pushItem(video.src, 'videos');
+                }
+                video.querySelectorAll('source').forEach((source) => {
+                  if (source.src) {
+                    pushItem(source.src, 'videos');
+                  }
+                });
+              });
+
+              document.querySelectorAll('audio').forEach((audio) => {
+                if (audio.src) {
+                  pushItem(audio.src, 'audio');
+                }
+                audio.querySelectorAll('source').forEach((source) => {
+                  if (source.src) {
+                    pushItem(source.src, 'audio');
+                  }
+                });
+              });
+
+              document.querySelectorAll('img').forEach((img) => {
+                const src = img.currentSrc || img.src || '';
+                if (/\.gif(?:$|\?)/i.test(src)) {
+                  pushItem(src, 'images');
+                }
+              });
+
+              return JSON.stringify(items);
             })();
         """
     }
