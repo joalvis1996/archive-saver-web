@@ -1,12 +1,15 @@
 package com.archivesaver.android
 
 import android.annotation.SuppressLint
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.widget.ArrayAdapter
 import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
@@ -50,15 +53,22 @@ class MainActivity : AppCompatActivity() {
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
+        configureCollectionPicker()
         configureWebView()
         configureButtons()
-        handleIncomingIntent(intent, autoSave = true)
+        handleIncomingIntent(intent)
+        prefillClipboardUrlIfEmpty()
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        handleIncomingIntent(intent, autoSave = true)
+        handleIncomingIntent(intent)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        prefillClipboardUrlIfEmpty()
     }
 
     override fun onDestroy() {
@@ -80,11 +90,37 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun handleIncomingIntent(intent: Intent?, autoSave: Boolean) {
+    private fun configureCollectionPicker() {
+        val adapter = ArrayAdapter(
+            this,
+            android.R.layout.simple_dropdown_item_1line,
+            resources.getStringArray(R.array.collection_options)
+        )
+        binding.collectionInput.setAdapter(adapter)
+        binding.collectionInput.setText(getString(R.string.collection_default), false)
+    }
+
+    private fun handleIncomingIntent(intent: Intent?) {
         val sharedUrl = extractSharedUrl(intent) ?: return
         binding.urlInput.setText(sharedUrl)
-        updateStatus("공유된 페이지를 열고 있습니다...")
-        loadUrl(sharedUrl, autoSave)
+        binding.collectionInput.setText(getString(R.string.collection_default), false)
+        updateStatus("공유된 링크를 입력했습니다. 페이지를 열고 저장을 눌러주세요.")
+    }
+
+    private fun prefillClipboardUrlIfEmpty() {
+        if (!binding.urlInput.text.isNullOrBlank()) {
+            return
+        }
+
+        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        val clipText = clipboard.primaryClip
+            ?.takeIf { it.itemCount > 0 }
+            ?.getItemAt(0)
+            ?.coerceToText(this)
+            ?.toString()
+        val clipboardUrl = extractFirstUrl(clipText) ?: return
+        binding.urlInput.setText(clipboardUrl)
+        updateStatus("클립보드의 링크를 입력했습니다.")
     }
 
     private fun loadCurrentInput(autoSave: Boolean) {
@@ -191,7 +227,7 @@ class MainActivity : AppCompatActivity() {
         val body = JSONObject().apply {
             put("url", url)
             put("html", html)
-            put("collectionTitle", BuildConfig.DEFAULT_COLLECTION_TITLE)
+            put("collectionTitle", selectedCollectionTitle())
             put("clientCaptureMode", "android-webview")
         }
 
@@ -322,6 +358,14 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateStatus(message: String) {
         binding.statusText.text = message
+    }
+
+    private fun selectedCollectionTitle(): String {
+        return binding.collectionInput.text
+            ?.toString()
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
+            ?: BuildConfig.DEFAULT_COLLECTION_TITLE
     }
 
     private inner class ArchiveSaverBridge {

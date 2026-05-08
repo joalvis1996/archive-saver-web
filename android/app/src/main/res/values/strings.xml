@@ -1,8 +1,21 @@
 <resources>
     <string name="app_name">Archive Saver</string>
-    <string name="subtitle">삼성 브라우저 공유 링크를 받아 WebView에서 열고 기존 Flask API로 저장합니다.</string>
-    <string name="url_hint">https://m.fmkorea.com/...</string>
+    <string name="subtitle">공유한 페이지를 조용히 캡처하고 아카이브합니다.</string>
     <string name="open_page">페이지 열기</string>
     <string name="save_page">저장하기</string>
     <string name="idle_status">공유로 URL을 받거나 직접 입력하세요.</string>
+    <string name="url_label">저장할 링크</string>
+    <string name="collection_label">컬렉션</string>
+    <string name="collection_default">축구</string>
+    <string name="status_label">진행 상태</string>
+    <string name="preview_label">미리보기</string>
+    <string name="step_capture">캡처</string>
+    <string name="step_upload">업로드</string>
+    <string name="step_archive">저장</string>
+    <string-array name="collection_options">
+        <item>축구</item>
+        <item>야구</item>
+        <item>잡</item>
+        <item>미분류</item>
+    </string-array>
 </resources>
