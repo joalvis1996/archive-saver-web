@@ -26,9 +26,12 @@ import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.File
 import java.io.FileOutputStream
+import java.io.IOException
 import java.io.OutputStream
 import java.io.OutputStreamWriter
 import java.net.HttpURLConnection
+import java.net.SocketTimeoutException
+import java.net.UnknownHostException
 import java.net.URL
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -278,7 +281,11 @@ class MainActivity : AppCompatActivity() {
 
     private fun postArchiveRequest(url: String, html: String) {
         networkExecutor.execute {
-            val result = runCatching { performArchiveRequest(url, html) }
+            val result = runCatching {
+                withNetworkRetry("아카이브 저장") {
+                    performArchiveRequest(url, html)
+                }
+            }
 
             mainHandler.post {
                 val (code, message) = result.getOrElse { -1 to (it.message ?: "알 수 없는 오류") }
@@ -334,12 +341,19 @@ class MainActivity : AppCompatActivity() {
                     }
 
                     val tempFile = downloadMediaToTempFile(candidate, pageUrl)
-                    val uploadedUrl = uploadMediaFile(tempFile, candidate)
-                    rewrittenHtml = rewrittenHtml.replace(candidate.sourceUrl, uploadedUrl)
-                    tempFile.delete()
+                    try {
+                        val uploadedUrl = withNetworkRetry("미디어 업로드") {
+                            uploadMediaFile(tempFile, candidate)
+                        }
+                        rewrittenHtml = rewrittenHtml.replace(candidate.sourceUrl, uploadedUrl)
+                    } finally {
+                        tempFile.delete()
+                    }
                 }
 
-                performArchiveRequest(pageUrl, rewrittenHtml)
+                withNetworkRetry("아카이브 저장") {
+                    performArchiveRequest(pageUrl, rewrittenHtml)
+                }
             }
 
             mainHandler.post {
@@ -375,6 +389,57 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateStatus(message: String) {
         binding.statusText.text = message
+    }
+
+    private fun <T> withNetworkRetry(label: String, attempts: Int = 3, block: () -> T): T {
+        var lastError: Throwable? = null
+        repeat(attempts) { index ->
+            try {
+                return block()
+            } catch (error: Throwable) {
+                lastError = error
+                if (!error.isRetryableNetworkError() || index == attempts - 1) {
+                    throw IllegalStateException(error.toUserFacingNetworkMessage(label), error)
+                }
+                Thread.sleep(900L * (index + 1))
+            }
+        }
+
+        throw IllegalStateException(
+            lastError?.toUserFacingNetworkMessage(label) ?: "$label 중 알 수 없는 오류가 발생했습니다.",
+            lastError
+        )
+    }
+
+    private fun Throwable.isRetryableNetworkError(): Boolean {
+        return hasCause<UnknownHostException>() ||
+            hasCause<SocketTimeoutException>() ||
+            hasCause<IOException>()
+    }
+
+    private inline fun <reified T : Throwable> Throwable.hasCause(): Boolean {
+        var current: Throwable? = this
+        while (current != null) {
+            if (current is T) {
+                return true
+            }
+            current = current.cause
+        }
+        return false
+    }
+
+    private fun Throwable.toUserFacingNetworkMessage(label: String): String {
+        return when {
+            hasCause<UnknownHostException>() ->
+                "$label 실패: Archive Saver 서버 주소를 찾지 못했습니다. 휴대폰 인터넷, Private DNS 또는 VPN 상태를 확인한 뒤 다시 시도해주세요."
+            hasCause<SocketTimeoutException>() ->
+                "$label 실패: 서버 응답이 늦어졌습니다. 잠시 후 다시 시도해주세요."
+            hasCause<IOException>() ->
+                "$label 실패: 서버와 연결하지 못했습니다. 네트워크 상태를 확인한 뒤 다시 시도해주세요."
+            message.isNullOrBlank() ->
+                "$label 실패: 알 수 없는 오류가 발생했습니다."
+            else -> message.orEmpty()
+        }
     }
 
     private fun selectedCollectionTitle(): String {
@@ -473,8 +538,32 @@ class MainActivity : AppCompatActivity() {
         return if (parsed.scheme.isNullOrBlank() || parsed.host.isNullOrBlank()) {
             null
         } else {
-            parsed.toString()
+            normalizeFmkoreaDocumentUrl(parsed).toString()
         }
+    }
+
+    private fun normalizeFmkoreaDocumentUrl(uri: Uri): Uri {
+        val host = uri.host.orEmpty().lowercase()
+        if (host != "m.fmkorea.com" && host != "www.fmkorea.com" && host != "fmkorea.com") {
+            return uri
+        }
+
+        val documentId = uri.getQueryParameter("document_srl")
+            ?.takeIf { it.matches(Regex("""\d+""")) }
+            ?: return uri
+
+        val board = uri.getQueryParameter("mid")
+            ?.takeIf { it.isNotBlank() }
+            ?: uri.pathSegments.firstOrNull()
+            ?: "best"
+
+        return uri.buildUpon()
+            .scheme("https")
+            .authority("m.fmkorea.com")
+            .encodedPath("/$board/$documentId")
+            .encodedQuery(null)
+            .fragment(null)
+            .build()
     }
 
     private fun decodeJavascriptString(raw: String?): String {
