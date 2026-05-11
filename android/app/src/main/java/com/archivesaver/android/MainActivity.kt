@@ -6,10 +6,14 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.view.View
 import android.widget.ArrayAdapter
+import android.widget.LinearLayout
+import android.widget.TextView
 import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
@@ -33,6 +37,7 @@ import java.net.HttpURLConnection
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
 import java.net.URL
+import java.util.UUID
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
@@ -49,7 +54,11 @@ class MainActivity : AppCompatActivity() {
     private var shouldAutoSaveAfterLoad = false
     private var isSaving = false
     private var currentCaptureUrl: String? = null
+    private var pendingSharedUrl: String? = null
     private val htmlCaptureBuffer = StringBuilder()
+    private val jobStoreListener = ArchiveJobStore.Listener { jobs ->
+        mainHandler.post { renderJobList(jobs) }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -72,6 +81,16 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         prefillClipboardUrlIfEmpty()
+    }
+
+    override fun onStart() {
+        super.onStart()
+        ArchiveJobStore.addListener(jobStoreListener)
+    }
+
+    override fun onStop() {
+        super.onStop()
+        ArchiveJobStore.removeListener(jobStoreListener)
     }
 
     override fun onDestroy() {
@@ -101,6 +120,16 @@ class MainActivity : AppCompatActivity() {
 
     private fun handleIncomingIntent(intent: Intent?) {
         val sharedUrl = extractSharedUrl(intent) ?: return
+        if (isSaving) {
+            pendingSharedUrl = sharedUrl
+            updateStatus("현재 페이지를 저장 작업에 등록한 뒤 새 링크를 입력합니다.")
+            return
+        }
+
+        applySharedUrl(sharedUrl)
+    }
+
+    private fun applySharedUrl(sharedUrl: String) {
         binding.urlInput.setText(sharedUrl)
         binding.collectionInput.setText(getString(R.string.collection_default), false)
         shouldAutoSaveAfterLoad = false
@@ -108,6 +137,12 @@ class MainActivity : AppCompatActivity() {
         htmlCaptureBuffer.setLength(0)
         binding.progressBar.progress = 0
         updateStatus("공유된 링크를 입력했습니다. 저장하기를 누르면 이 페이지를 저장합니다.")
+    }
+
+    private fun applyPendingSharedUrlIfAny() {
+        val sharedUrl = pendingSharedUrl ?: return
+        pendingSharedUrl = null
+        applySharedUrl(sharedUrl)
     }
 
     private fun prefillClipboardUrlIfEmpty() {
@@ -309,15 +344,77 @@ class MainActivity : AppCompatActivity() {
         binding.progressBar.progress = 72
         binding.webView.evaluateJavascript(MEDIA_CANDIDATES_SCRIPT) { rawJson ->
             val candidates = parseMediaCandidates(rawJson)
-            if (candidates.isEmpty()) {
-                updateStatus("캡처한 페이지를 서버에 저장하는 중...")
-                binding.progressBar.progress = 78
-                postArchiveRequest(pageUrl, html)
-                return@evaluateJavascript
-            }
-
-            uploadMediaCandidatesAndSave(pageUrl, html, candidates)
+            enqueueBackgroundSave(pageUrl, html, candidates)
         }
+    }
+
+    private fun enqueueBackgroundSave(
+        pageUrl: String,
+        html: String,
+        candidates: List<MediaCandidate>
+    ) {
+        val jobId = UUID.randomUUID().toString()
+        val collectionTitle = selectedCollectionTitle()
+        val jobFile = runCatching {
+            val jobsDir = File(cacheDir, "archive_jobs").apply { mkdirs() }
+            File.createTempFile("archive_job_", ".json", jobsDir).apply {
+                writeText(
+                    JSONObject().apply {
+                        put("id", jobId)
+                        put("url", pageUrl)
+                        put("html", html)
+                        put("collectionTitle", collectionTitle)
+                        put(
+                            "mediaCandidates",
+                            JSONArray().apply {
+                                candidates
+                                    .filter { it.sourceUrl.isNotBlank() }
+                                    .distinctBy { "${it.mediaType}:${it.sourceUrl}" }
+                                    .forEach { candidate ->
+                                        put(JSONObject().apply {
+                                            put("url", candidate.sourceUrl)
+                                            put("mediaType", candidate.mediaType)
+                                        })
+                                    }
+                            }
+                        )
+                    }.toString(),
+                    Charsets.UTF_8
+                )
+            }
+        }.getOrElse { error ->
+            finishSaveWithError(error.message ?: "저장 작업 파일을 만들지 못했습니다.")
+            return
+        }
+
+        ArchiveJobStore.upsert(
+            ArchiveJobStore.Job(
+                id = jobId,
+                url = pageUrl,
+                collectionTitle = collectionTitle,
+                status = "백그라운드 저장 대기",
+                progress = 0
+            )
+        )
+
+        val intent = Intent(this, ArchiveSaveService::class.java).apply {
+            action = ArchiveSaveService.ACTION_ENQUEUE_SAVE
+            putExtra(ArchiveSaveService.EXTRA_JOB_FILE_PATH, jobFile.absolutePath)
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(intent)
+        } else {
+            startService(intent)
+        }
+
+        binding.progressBar.progress = 100
+        updateStatus("백그라운드 저장을 시작했습니다. 다른 링크도 계속 추가할 수 있습니다.")
+        isSaving = false
+        setButtonsEnabled(true)
+        currentCaptureUrl = null
+        htmlCaptureBuffer.setLength(0)
+        applyPendingSharedUrlIfAny()
     }
 
     private fun uploadMediaCandidatesAndSave(
@@ -380,6 +477,7 @@ class MainActivity : AppCompatActivity() {
         setButtonsEnabled(true)
         currentCaptureUrl = null
         htmlCaptureBuffer.setLength(0)
+        applyPendingSharedUrlIfAny()
     }
 
     private fun setButtonsEnabled(enabled: Boolean) {
@@ -390,6 +488,59 @@ class MainActivity : AppCompatActivity() {
     private fun updateStatus(message: String) {
         binding.statusText.text = message
     }
+
+    private fun renderJobList(jobs: List<ArchiveJobStore.Job>) {
+        binding.jobListLabel.visibility = if (jobs.isEmpty()) View.GONE else View.VISIBLE
+        binding.jobListContainer.visibility = if (jobs.isEmpty()) View.GONE else View.VISIBLE
+        binding.jobListContainer.removeAllViews()
+
+        jobs.reversed().take(5).forEach { job ->
+            binding.jobListContainer.addView(createJobRow(job))
+        }
+    }
+
+    private fun createJobRow(job: ArchiveJobStore.Job): View {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, 8.dp, 0, 8.dp)
+        }
+
+        val title = TextView(this).apply {
+            text = "${job.collectionTitle} · ${shortUrlLabel(job.url)}"
+            setTextColor(getColor(R.color.text_primary))
+            textSize = 13f
+            maxLines = 1
+        }
+        row.addView(title)
+
+        val status = TextView(this).apply {
+            text = "${job.status} · ${job.progress}%"
+            setTextColor(
+                getColor(
+                    when {
+                        job.isFailed -> R.color.error
+                        job.isFinished -> R.color.accent
+                        else -> R.color.text_secondary
+                    }
+                )
+            )
+            textSize = 12f
+            maxLines = 2
+        }
+        row.addView(status)
+
+        return row
+    }
+
+    private fun shortUrlLabel(url: String): String {
+        return runCatching {
+            val uri = Uri.parse(url)
+            listOfNotNull(uri.host, uri.path).joinToString("")
+        }.getOrDefault(url)
+    }
+
+    private val Int.dp: Int
+        get() = (this * resources.displayMetrics.density).toInt()
 
     private fun <T> withNetworkRetry(label: String, attempts: Int = 3, block: () -> T): T {
         var lastError: Throwable? = null

@@ -8,6 +8,7 @@
     <string name="collection_label">컬렉션</string>
     <string name="collection_default">축구</string>
     <string name="status_label">진행 상태</string>
+    <string name="active_jobs_label">저장 작업</string>
     <string name="preview_label">미리보기</string>
     <string name="step_capture">캡처</string>
     <string name="step_upload">업로드</string>
