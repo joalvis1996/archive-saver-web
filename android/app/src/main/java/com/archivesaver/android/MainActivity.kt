@@ -82,11 +82,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         binding.saveButton.setOnClickListener {
-            if (binding.webView.url.isNullOrBlank()) {
-                loadCurrentInput(autoSave = true)
-            } else {
-                captureAndSaveCurrentPage()
-            }
+            saveCurrentInputOrLoadedPage()
         }
     }
 
@@ -104,7 +100,11 @@ class MainActivity : AppCompatActivity() {
         val sharedUrl = extractSharedUrl(intent) ?: return
         binding.urlInput.setText(sharedUrl)
         binding.collectionInput.setText(getString(R.string.collection_default), false)
-        updateStatus("공유된 링크를 입력했습니다. 페이지를 열고 저장을 눌러주세요.")
+        shouldAutoSaveAfterLoad = false
+        currentCaptureUrl = null
+        htmlCaptureBuffer.setLength(0)
+        binding.progressBar.progress = 0
+        updateStatus("공유된 링크를 입력했습니다. 저장하기를 누르면 이 페이지를 저장합니다.")
     }
 
     private fun prefillClipboardUrlIfEmpty() {
@@ -142,6 +142,23 @@ class MainActivity : AppCompatActivity() {
         shouldAutoSaveAfterLoad = autoSave
         binding.progressBar.progress = 10
         binding.webView.loadUrl(normalized)
+    }
+
+    private fun saveCurrentInputOrLoadedPage() {
+        val inputUrl = normalizeUrl(binding.urlInput.text?.toString().orEmpty())
+        if (inputUrl == null) {
+            updateStatus("URL을 먼저 입력하세요.")
+            return
+        }
+
+        val loadedUrl = binding.webView.url?.let(::normalizeUrl)
+        if (loadedUrl != inputUrl) {
+            updateStatus("입력한 페이지를 먼저 여는 중...")
+            loadUrl(inputUrl, autoSave = true)
+            return
+        }
+
+        captureAndSaveCurrentPage()
     }
 
     @SuppressLint("SetJavaScriptEnabled")
