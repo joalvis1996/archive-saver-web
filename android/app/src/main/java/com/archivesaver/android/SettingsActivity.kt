@@ -4,6 +4,8 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
 import android.view.View
+import android.webkit.WebStorage
+import android.webkit.WebView
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -29,6 +31,7 @@ class SettingsActivity : AppCompatActivity() {
         binding.clearCacheButton.setOnClickListener {
             clearTemporaryCache()
             renderCacheSize()
+            binding.root.postDelayed({ renderCacheSize() }, 500L)
             Toast.makeText(this, R.string.cache_cleaned, Toast.LENGTH_SHORT).show()
         }
 
@@ -171,6 +174,15 @@ class SettingsActivity : AppCompatActivity() {
                     (file.name.startsWith("archive_") || file.parentFile?.name == "archive_jobs")
             }
             .forEach { file -> runCatching { file.delete() } }
+
+        runCatching { WebStorage.getInstance().deleteAllData() }
+        runCatching {
+            WebView(this).apply {
+                clearCache(true)
+                clearHistory()
+                destroy()
+            }
+        }
     }
 
     private fun File.sizeBytes(): Long {
