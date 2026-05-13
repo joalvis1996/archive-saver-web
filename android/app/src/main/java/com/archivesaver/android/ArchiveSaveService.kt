@@ -36,6 +36,7 @@ class ArchiveSaveService : Service() {
 
     private data class JobSummary(
         val id: String,
+        val title: String,
         val url: String,
         val collectionTitle: String
     )
@@ -65,6 +66,7 @@ class ArchiveSaveService : Service() {
         ArchiveJobStore.upsert(
             ArchiveJobStore.Job(
                 id = summary.id,
+                title = summary.title,
                 url = summary.url,
                 collectionTitle = summary.collectionTitle,
                 status = "저장 작업 대기",
@@ -120,6 +122,7 @@ class ArchiveSaveService : Service() {
         val job = JSONObject(jobFile.readText(Charsets.UTF_8))
         return JobSummary(
             id = job.optString("id").takeIf { it.isNotBlank() } ?: jobFile.nameWithoutExtension,
+            title = job.optString("title"),
             url = job.optString("url"),
             collectionTitle = job.optString("collectionTitle", BuildConfig.DEFAULT_COLLECTION_TITLE)
         )
@@ -161,8 +164,27 @@ class ArchiveSaveService : Service() {
         }
 
         jobFile.delete()
+        extractArchiveUrl(message)?.let { archiveUrl ->
+            ArchiveHistoryStore.add(
+                this,
+                ArchiveHistoryStore.Entry(
+                    title = summary.title,
+                    archiveUrl = archiveUrl,
+                    sourceUrl = pageUrl,
+                    collectionTitle = collectionTitle,
+                    savedAt = System.currentTimeMillis()
+                )
+            )
+        }
         ArchiveJobStore.update(summary.id, "저장 완료", 100, isFinished = true)
         updateNotification("저장 완료", activeJobs.get())
+    }
+
+    private fun extractArchiveUrl(message: String): String? {
+        return message
+            .lineSequence()
+            .map { it.trim() }
+            .firstOrNull { it.startsWith("http://") || it.startsWith("https://") }
     }
 
     private fun parseMediaCandidates(array: JSONArray?): List<MediaCandidate> {

@@ -2,6 +2,8 @@
     <color name="surface_bg">#F7F8FA</color>
     <color name="surface_card">#FFFFFF</color>
     <color name="surface_muted">#EEF2F1</color>
+    <color name="surface_input">#F9FAFB</color>
+    <color name="accent_soft">#E7F4F0</color>
     <color name="text_primary">#171717</color>
     <color name="text_secondary">#6B7280</color>
     <color name="border_subtle">#E5E7EB</color>

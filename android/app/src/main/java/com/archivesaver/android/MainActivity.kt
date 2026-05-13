@@ -12,6 +12,7 @@ import android.os.Handler
 import android.os.Looper
 import android.view.View
 import android.widget.ArrayAdapter
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.webkit.CookieManager
@@ -25,6 +26,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.webkit.WebSettingsCompat
 import androidx.webkit.WebViewFeature
 import com.archivesaver.android.databinding.ActivityMainBinding
+import com.google.android.material.tabs.TabLayout
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedReader
@@ -68,6 +70,7 @@ class MainActivity : AppCompatActivity() {
         configureCollectionPicker()
         configureWebView()
         configureButtons()
+        configureTabs()
         handleIncomingIntent(intent)
         prefillClipboardUrlIfEmpty()
     }
@@ -106,6 +109,29 @@ class MainActivity : AppCompatActivity() {
         binding.saveButton.setOnClickListener {
             saveCurrentInputOrLoadedPage()
         }
+
+        binding.clearFinishedJobsButton.setOnClickListener {
+            ArchiveJobStore.clearFinished()
+        }
+
+        binding.settingsButton.setOnClickListener {
+            startActivity(Intent(this, SettingsActivity::class.java))
+        }
+    }
+
+    private fun configureTabs() {
+        binding.contentTabs.addTab(binding.contentTabs.newTab().setText(R.string.jobs_tab))
+        binding.contentTabs.addTab(binding.contentTabs.newTab().setText(R.string.preview_tab))
+        binding.contentTabs.addOnTabSelectedListener(object : TabLayout.OnTabSelectedListener {
+            override fun onTabSelected(tab: TabLayout.Tab) {
+                val showPreview = tab.position == 1
+                binding.jobsContent.visibility = if (showPreview) View.INVISIBLE else View.VISIBLE
+                binding.previewCard.visibility = if (showPreview) View.VISIBLE else View.INVISIBLE
+            }
+
+            override fun onTabUnselected(tab: TabLayout.Tab) = Unit
+            override fun onTabReselected(tab: TabLayout.Tab) = Unit
+        })
     }
 
     private fun configureCollectionPicker() {
@@ -355,12 +381,14 @@ class MainActivity : AppCompatActivity() {
     ) {
         val jobId = UUID.randomUUID().toString()
         val collectionTitle = selectedCollectionTitle()
+        val pageTitle = pageTitleLabel(pageUrl)
         val jobFile = runCatching {
             val jobsDir = File(cacheDir, "archive_jobs").apply { mkdirs() }
             File.createTempFile("archive_job_", ".json", jobsDir).apply {
                 writeText(
                     JSONObject().apply {
                         put("id", jobId)
+                        put("title", pageTitle)
                         put("url", pageUrl)
                         put("html", html)
                         put("collectionTitle", collectionTitle)
@@ -390,6 +418,7 @@ class MainActivity : AppCompatActivity() {
         ArchiveJobStore.upsert(
             ArchiveJobStore.Job(
                 id = jobId,
+                title = pageTitle,
                 url = pageUrl,
                 collectionTitle = collectionTitle,
                 status = "백그라운드 저장 대기",
@@ -490,7 +519,16 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun renderJobList(jobs: List<ArchiveJobStore.Job>) {
-        binding.jobListLabel.visibility = if (jobs.isEmpty()) View.GONE else View.VISIBLE
+        val activeCount = jobs.count { !it.isFinished }
+        val finishedCount = jobs.count { it.isFinished }
+        binding.activeJobSummary.text = if (activeCount > 0) {
+            "•  ${activeCount}개 진행 중"
+        } else {
+            getString(R.string.no_active_jobs)
+        }
+        binding.clearFinishedJobsButton.visibility = if (finishedCount > 0) View.VISIBLE else View.GONE
+
+        binding.emptyJobsText.visibility = if (jobs.isEmpty()) View.VISIBLE else View.GONE
         binding.jobListContainer.visibility = if (jobs.isEmpty()) View.GONE else View.VISIBLE
         binding.jobListContainer.removeAllViews()
 
@@ -501,35 +539,132 @@ class MainActivity : AppCompatActivity() {
 
     private fun createJobRow(job: ArchiveJobStore.Job): View {
         val row = LinearLayout(this).apply {
+            gravity = android.view.Gravity.CENTER_VERTICAL
+            orientation = LinearLayout.HORIZONTAL
+            background = getDrawable(R.drawable.job_item_background)
+            setPadding(12.dp, 10.dp, 12.dp, 10.dp)
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                bottomMargin = 8.dp
+            }
+        }
+
+        row.addView(LinearLayout(this).apply {
+            gravity = android.view.Gravity.CENTER
+            background = getDrawable(R.drawable.icon_tile_background)
+            layoutParams = LinearLayout.LayoutParams(44.dp, 44.dp)
+            addView(ImageView(this@MainActivity).apply {
+                setImageResource(if (job.title.contains("영상") || job.status.contains("미디어")) R.drawable.ic_play_24 else R.drawable.ic_document_24)
+                layoutParams = LinearLayout.LayoutParams(24.dp, 24.dp)
+            })
+        })
+
+        row.addView(LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(0, 8.dp, 0, 8.dp)
-        }
+            layoutParams = LinearLayout.LayoutParams(
+                0,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                1f
+            ).apply {
+                marginStart = 12.dp
+            }
 
-        val title = TextView(this).apply {
-            text = "${job.collectionTitle} · ${shortUrlLabel(job.url)}"
-            setTextColor(getColor(R.color.text_primary))
-            textSize = 13f
-            maxLines = 1
-        }
-        row.addView(title)
+            addView(TextView(this@MainActivity).apply {
+                text = job.title.ifBlank { shortUrlLabel(job.url) }
+                setTextColor(getColor(R.color.text_primary))
+                textSize = 14f
+                setTypeface(typeface, android.graphics.Typeface.BOLD)
+                maxLines = 1
+            })
 
-        val status = TextView(this).apply {
-            text = "${job.status} · ${job.progress}%"
-            setTextColor(
-                getColor(
-                    when {
-                        job.isFailed -> R.color.error
-                        job.isFinished -> R.color.accent
-                        else -> R.color.text_secondary
-                    }
+            addView(TextView(this@MainActivity).apply {
+                text = "${job.collectionTitle}  ·  ${shortUrlLabel(job.url)}"
+                setTextColor(
+                    getColor(
+                        when {
+                            job.isFailed -> R.color.error
+                            else -> R.color.text_secondary
+                        }
+                    )
                 )
-            )
-            textSize = 12f
-            maxLines = 2
+                textSize = 12f
+                maxLines = 1
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply {
+                    topMargin = 4.dp
+                }
+            })
+        })
+
+        val rightStatus = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                marginStart = 12.dp
+            }
         }
-        row.addView(status)
+
+        rightStatus.addView(LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = android.view.Gravity.CENTER
+            layoutParams = LinearLayout.LayoutParams(52.dp, LinearLayout.LayoutParams.WRAP_CONTENT)
+
+            addView(TextView(this@MainActivity).apply {
+                text = if (job.isFinished && !job.isFailed) "" else "${job.progress}%"
+                setTextColor(getColor(if (job.isFailed) R.color.error else R.color.accent))
+                textSize = 14f
+                setTypeface(typeface, android.graphics.Typeface.BOLD)
+                gravity = android.view.Gravity.CENTER
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                )
+            })
+
+            addView(TextView(this@MainActivity).apply {
+                text = when {
+                    job.isFailed -> "실패"
+                    job.isFinished -> "완료"
+                    job.status.contains("업로드") -> "업로드 중"
+                    else -> "저장 중"
+                }
+                setTextColor(getColor(if (job.isFailed) R.color.error else R.color.text_secondary))
+                textSize = 11f
+                gravity = android.view.Gravity.CENTER
+                maxLines = 1
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply {
+                    topMargin = 1.dp
+                }
+            })
+        })
+
+        rightStatus.addView(CircularProgressView(this).apply {
+            progress = if (job.isFinished && !job.isFailed) 100 else job.progress
+            layoutParams = LinearLayout.LayoutParams(34.dp, 34.dp).apply {
+                marginStart = 6.dp
+            }
+        })
+        row.addView(rightStatus)
 
         return row
+    }
+
+    private fun pageTitleLabel(url: String): String {
+        return binding.webView.title
+            ?.trim()
+            ?.substringBefore(" - ")
+            ?.takeIf { it.isNotBlank() && !it.equals("about:blank", ignoreCase = true) }
+            ?: shortUrlLabel(url)
     }
 
     private fun shortUrlLabel(url: String): String {
@@ -887,37 +1022,87 @@ class MainActivity : AppCompatActivity() {
     companion object {
         private const val PREPARE_PAGE_SCRIPT = """
             (async function() {
-              const lazyAttrs = ['data-src', 'data-lazy-src', 'data-original', 'data-url'];
+              const lazyAttrs = [
+                'data-src',
+                'data-lazy-src',
+                'data-original',
+                'data-url',
+                'data-file',
+                'data-image',
+                'data-img',
+                'data-thumb',
+                'data-actualsrc'
+              ];
+              const srcsetAttrs = ['data-srcset', 'data-lazy-srcset'];
+              const resolveUrl = (value) => {
+                if (!value) return '';
+                try {
+                  return new URL(value, location.href).href;
+                } catch (_) {
+                  return value;
+                }
+              };
+              const isPlaceholder = (value) => {
+                const src = String(value || '').toLowerCase();
+                return !src ||
+                  src.startsWith('data:image') ||
+                  src.includes('blank') ||
+                  src.includes('loading') ||
+                  src.includes('transparent') ||
+                  src.includes('spacer');
+              };
               document.querySelectorAll('img, video, audio, source, iframe').forEach((node) => {
                 lazyAttrs.forEach((attr) => {
                   const value = node.getAttribute(attr);
-                  if (value && !node.getAttribute('src')) {
-                    node.setAttribute('src', value);
+                  if (value) {
+                    const absoluteValue = resolveUrl(value);
+                    node.setAttribute(attr, absoluteValue);
+                    if (!node.getAttribute('src') || isPlaceholder(node.getAttribute('src'))) {
+                      node.setAttribute('src', absoluteValue);
+                    }
                   }
                 });
                 if (node.src) {
                   node.setAttribute('src', node.src);
                 }
-                const srcset = node.getAttribute('data-srcset');
-                if (srcset && !node.getAttribute('srcset')) {
-                  node.setAttribute('srcset', srcset);
-                }
+                srcsetAttrs.forEach((attr) => {
+                  const srcset = node.getAttribute(attr);
+                  if (srcset) {
+                    node.setAttribute(attr, srcset);
+                    if (!node.getAttribute('srcset')) {
+                      node.setAttribute('srcset', srcset);
+                    }
+                  }
+                });
+                node.removeAttribute('loading');
               });
               document.querySelectorAll('video, audio').forEach((node) => {
                 node.setAttribute('controls', '');
                 node.removeAttribute('autoplay');
               });
               const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-              let previousHeight = 0;
-              for (let i = 0; i < 20; i += 1) {
-                window.scrollTo(0, document.body.scrollHeight);
-                await sleep(350);
+              let stableCount = 0;
+              let previousHeight = document.body.scrollHeight;
+              for (let i = 0; i < 60; i += 1) {
+                const targetY = Math.min(
+                  document.body.scrollHeight,
+                  Math.floor(i * window.innerHeight * 0.75)
+                );
+                window.scrollTo(0, targetY);
+                await sleep(220);
                 const currentHeight = document.body.scrollHeight;
-                if (currentHeight === previousHeight) {
+                stableCount = currentHeight === previousHeight ? stableCount + 1 : 0;
+                previousHeight = currentHeight;
+                if (targetY >= currentHeight - window.innerHeight && stableCount >= 4) {
                   break;
                 }
-                previousHeight = currentHeight;
               }
+              document.querySelectorAll('img').forEach((img) => {
+                const bestSrc = img.currentSrc || img.src || '';
+                if (bestSrc) {
+                  img.setAttribute('src', bestSrc);
+                }
+              });
               window.scrollTo(0, 0);
               return true;
             })();
@@ -951,11 +1136,35 @@ class MainActivity : AppCompatActivity() {
               const items = [];
               const seen = new Set();
               const pushItem = (url, mediaType) => {
-                if (!url || seen.has(mediaType + ':' + url)) {
+                if (!url) {
                   return;
                 }
-                seen.add(mediaType + ':' + url);
-                items.push({ url, mediaType });
+                let absoluteUrl = '';
+                try {
+                  absoluteUrl = new URL(url, location.href).href;
+                } catch (_) {
+                  absoluteUrl = url;
+                }
+                if (
+                  !absoluteUrl ||
+                  absoluteUrl.startsWith('data:') ||
+                  absoluteUrl.startsWith('blob:') ||
+                  absoluteUrl.startsWith('about:') ||
+                  seen.has(mediaType + ':' + absoluteUrl)
+                ) {
+                  return;
+                }
+                seen.add(mediaType + ':' + absoluteUrl);
+                items.push({ url: absoluteUrl, mediaType });
+              };
+              const pushSrcset = (srcset, mediaType) => {
+                if (!srcset) {
+                  return;
+                }
+                srcset.split(',').forEach((part) => {
+                  const url = part.trim().split(/\s+/)[0];
+                  pushItem(url, mediaType);
+                });
               };
 
               document.querySelectorAll('video').forEach((video) => {
@@ -981,10 +1190,23 @@ class MainActivity : AppCompatActivity() {
               });
 
               document.querySelectorAll('img').forEach((img) => {
-                const src = img.currentSrc || img.src || '';
-                if (/\.gif(?:$|\?)/i.test(src)) {
-                  pushItem(src, 'images');
-                }
+                [
+                  img.currentSrc,
+                  img.src,
+                  img.getAttribute('src'),
+                  img.getAttribute('data-src'),
+                  img.getAttribute('data-lazy-src'),
+                  img.getAttribute('data-original'),
+                  img.getAttribute('data-url'),
+                  img.getAttribute('data-file'),
+                  img.getAttribute('data-image'),
+                  img.getAttribute('data-img'),
+                  img.getAttribute('data-thumb'),
+                  img.getAttribute('data-actualsrc')
+                ].forEach((src) => pushItem(src, 'images'));
+                pushSrcset(img.getAttribute('srcset'), 'images');
+                pushSrcset(img.getAttribute('data-srcset'), 'images');
+                pushSrcset(img.getAttribute('data-lazy-srcset'), 'images');
               });
 
               return JSON.stringify(items);

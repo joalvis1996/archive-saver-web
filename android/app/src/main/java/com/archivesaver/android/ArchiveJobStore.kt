@@ -3,6 +3,7 @@ package com.archivesaver.android
 object ArchiveJobStore {
     data class Job(
         val id: String,
+        val title: String,
         val url: String,
         val collectionTitle: String,
         val status: String,
