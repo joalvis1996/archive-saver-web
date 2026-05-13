@@ -10,6 +10,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
+import android.webkit.CookieManager
 import androidx.core.app.NotificationCompat
 import org.json.JSONArray
 import org.json.JSONObject
@@ -147,7 +148,7 @@ class ArchiveSaveService : Service() {
                 val uploadedUrl = withNetworkRetry("미디어 업로드") {
                     uploadMediaFile(tempFile, candidate)
                 }
-                rewrittenHtml = rewrittenHtml.replace(candidate.sourceUrl, uploadedUrl)
+                rewrittenHtml = replaceMediaReferences(rewrittenHtml, candidate.sourceUrl, uploadedUrl)
             } finally {
                 tempFile.delete()
             }
@@ -256,6 +257,9 @@ class ArchiveSaveService : Service() {
                 "User-Agent",
                 "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Mobile Safari/537.36"
             )
+        }
+        CookieManager.getInstance().getCookie(candidate.sourceUrl)?.takeIf { it.isNotBlank() }?.let {
+            connection.setRequestProperty("Cookie", it)
         }
 
         val responseCode = connection.responseCode
@@ -368,6 +372,7 @@ class ArchiveSaveService : Service() {
             lowerName.endsWith(".gif") -> "image/gif"
             lowerName.endsWith(".png") -> "image/png"
             lowerName.endsWith(".jpg") || lowerName.endsWith(".jpeg") -> "image/jpeg"
+            lowerName.endsWith(".webp") -> "image/webp"
             lowerName.endsWith(".webm") -> "video/webm"
             lowerName.endsWith(".mp4") -> "video/mp4"
             lowerName.endsWith(".mp3") -> "audio/mpeg"
@@ -375,6 +380,42 @@ class ArchiveSaveService : Service() {
             mediaType == "videos" -> "video/mp4"
             mediaType == "audio" -> "audio/mpeg"
             else -> "application/octet-stream"
+        }
+    }
+
+    private fun replaceMediaReferences(html: String, sourceUrl: String, uploadedUrl: String): String {
+        var rewritten = html
+        mediaUrlVariants(sourceUrl)
+            .sortedByDescending { it.length }
+            .forEach { variant ->
+                rewritten = rewritten.replace(variant, uploadedUrl)
+                rewritten = rewritten.replace(variant.replace("&", "&amp;"), uploadedUrl)
+            }
+        return rewritten
+    }
+
+    private fun mediaUrlVariants(sourceUrl: String): Set<String> {
+        val parsed = Uri.parse(sourceUrl)
+        val host = parsed.host ?: return setOf(sourceUrl)
+        val encodedPath = parsed.encodedPath.orEmpty()
+        val normalizedPath = encodedPath.replace("/./", "/")
+        val dottedPath = if (normalizedPath.startsWith("/files/")) {
+            "/.$normalizedPath"
+        } else {
+            normalizedPath
+        }
+        val query = parsed.encodedQuery?.let { "?$it" }.orEmpty()
+        val paths = setOf(encodedPath, normalizedPath, dottedPath).filter { it.isNotBlank() }
+        val schemes = setOfNotNull(parsed.scheme, "https", "http")
+
+        return buildSet {
+            add(sourceUrl)
+            paths.forEach { path ->
+                schemes.forEach { scheme ->
+                    add("$scheme://$host$path$query")
+                }
+                add("//$host$path$query")
+            }
         }
     }
 

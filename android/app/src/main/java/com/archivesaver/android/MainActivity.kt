@@ -471,7 +471,7 @@ class MainActivity : AppCompatActivity() {
                         val uploadedUrl = withNetworkRetry("미디어 업로드") {
                             uploadMediaFile(tempFile, candidate)
                         }
-                        rewrittenHtml = rewrittenHtml.replace(candidate.sourceUrl, uploadedUrl)
+                        rewrittenHtml = replaceMediaReferences(rewrittenHtml, candidate.sourceUrl, uploadedUrl)
                     } finally {
                         tempFile.delete()
                     }
@@ -1009,6 +1009,7 @@ class MainActivity : AppCompatActivity() {
             lowerName.endsWith(".gif") -> "image/gif"
             lowerName.endsWith(".png") -> "image/png"
             lowerName.endsWith(".jpg") || lowerName.endsWith(".jpeg") -> "image/jpeg"
+            lowerName.endsWith(".webp") -> "image/webp"
             lowerName.endsWith(".webm") -> "video/webm"
             lowerName.endsWith(".mp4") -> "video/mp4"
             lowerName.endsWith(".mp3") -> "audio/mpeg"
@@ -1016,6 +1017,42 @@ class MainActivity : AppCompatActivity() {
             mediaType == "videos" -> "video/mp4"
             mediaType == "audio" -> "audio/mpeg"
             else -> "application/octet-stream"
+        }
+    }
+
+    private fun replaceMediaReferences(html: String, sourceUrl: String, uploadedUrl: String): String {
+        var rewritten = html
+        mediaUrlVariants(sourceUrl)
+            .sortedByDescending { it.length }
+            .forEach { variant ->
+                rewritten = rewritten.replace(variant, uploadedUrl)
+                rewritten = rewritten.replace(variant.replace("&", "&amp;"), uploadedUrl)
+            }
+        return rewritten
+    }
+
+    private fun mediaUrlVariants(sourceUrl: String): Set<String> {
+        val parsed = Uri.parse(sourceUrl)
+        val host = parsed.host ?: return setOf(sourceUrl)
+        val encodedPath = parsed.encodedPath.orEmpty()
+        val normalizedPath = encodedPath.replace("/./", "/")
+        val dottedPath = if (normalizedPath.startsWith("/files/")) {
+            "/.$normalizedPath"
+        } else {
+            normalizedPath
+        }
+        val query = parsed.encodedQuery?.let { "?$it" }.orEmpty()
+        val paths = setOf(encodedPath, normalizedPath, dottedPath).filter { it.isNotBlank() }
+        val schemes = setOfNotNull(parsed.scheme, "https", "http")
+
+        return buildSet {
+            add(sourceUrl)
+            paths.forEach { path ->
+                schemes.forEach { scheme ->
+                    add("$scheme://$host$path$query")
+                }
+                add("//$host$path$query")
+            }
         }
     }
 
@@ -1050,6 +1087,15 @@ class MainActivity : AppCompatActivity() {
                   src.includes('loading') ||
                   src.includes('transparent') ||
                   src.includes('spacer');
+              };
+              const bestLazySource = (node) => {
+                for (const attr of lazyAttrs) {
+                  const value = node.getAttribute(attr);
+                  if (value && !isPlaceholder(value)) {
+                    return resolveUrl(value);
+                  }
+                }
+                return '';
               };
               document.querySelectorAll('img, video, audio, source, iframe').forEach((node) => {
                 lazyAttrs.forEach((attr) => {
@@ -1098,10 +1144,13 @@ class MainActivity : AppCompatActivity() {
                 }
               }
               document.querySelectorAll('img').forEach((img) => {
-                const bestSrc = img.currentSrc || img.src || '';
+                const bestSrc = bestLazySource(img) ||
+                  (!isPlaceholder(img.currentSrc) ? img.currentSrc : '') ||
+                  (!isPlaceholder(img.src) ? img.src : '');
                 if (bestSrc) {
-                  img.setAttribute('src', bestSrc);
+                  img.setAttribute('src', resolveUrl(bestSrc));
                 }
+                img.removeAttribute('srcset');
               });
               window.scrollTo(0, 0);
               return true;
@@ -1135,8 +1184,17 @@ class MainActivity : AppCompatActivity() {
             (function() {
               const items = [];
               const seen = new Set();
+              const isPlaceholder = (value) => {
+                const src = String(value || '').toLowerCase();
+                return !src ||
+                  src.startsWith('data:image') ||
+                  src.includes('blank') ||
+                  src.includes('loading') ||
+                  src.includes('transparent') ||
+                  src.includes('spacer');
+              };
               const pushItem = (url, mediaType) => {
-                if (!url) {
+                if (!url || isPlaceholder(url)) {
                   return;
                 }
                 let absoluteUrl = '';
