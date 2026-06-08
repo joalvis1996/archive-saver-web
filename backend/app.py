@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, send_from_directory, Response, stream_with_context
+from flask import Flask, request, jsonify, send_from_directory, Response, redirect, stream_with_context
 import dropbox
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse, urljoin, unquote, parse_qs, quote
@@ -1197,7 +1197,7 @@ def view_archive(archive_id):
                     "script-src 'none'; "
                     "style-src 'self' 'unsafe-inline' data: https:; "
                     "img-src 'self' data: blob: https:; "
-                    "media-src 'self' data: blob:; "
+                    "media-src 'self' data: blob: https:; "
                     "font-src 'self' data: https:; "
                     "frame-src 'none'; "
                     "object-src 'none'; "
@@ -1221,6 +1221,13 @@ def view_archive_media(media_type, filename):
         safe_filename = normalize_media_filename(filename)
         dropbox_path = f"/web-archives/{media_type}/{safe_filename}"
         temporary_link = get_dropbox_temporary_link(dropbox_path)
+
+        if media_type in ["videos", "audio", "media"] and request.args.get("proxy") != "1":
+            response = redirect(temporary_link, code=302)
+            response.headers["Cache-Control"] = "private, max-age=60"
+            response.headers["Accept-Ranges"] = "bytes"
+            return response
+
         content_type = mimetypes.guess_type(safe_filename)[0] or "application/octet-stream"
 
         upstream_headers = {}
