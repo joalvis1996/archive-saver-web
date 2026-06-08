@@ -12,4 +12,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY backend/ ./
 
 # 앱 실행 (Render에서 자동으로 PORT 지정)
-CMD ["gunicorn", "app:app", "--bind", "0.0.0.0:$PORT"]
+CMD gunicorn app:app --bind 0.0.0.0:$PORT --timeout 600

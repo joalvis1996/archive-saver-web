@@ -21,6 +21,7 @@ USE_PLAYWRIGHT_CAPTURE = os.getenv("USE_PLAYWRIGHT_CAPTURE", "true").lower() != 
 DEFAULT_SHARED_COLLECTION_TITLE = os.getenv("DEFAULT_SHARED_COLLECTION_TITLE", "축구")
 DROPBOX_TEMP_LINK_TTL_SECONDS = 60 * 60 * 3
 DROPBOX_TEMP_LINK_CACHE = {}
+DROPBOX_UPLOAD_CHUNK_SIZE = 8 * 1024 * 1024
 CLIPPER_ALLOWED_ORIGINS = {
     "https://archive-saver-web.onrender.com",
     "http://127.0.0.1:5000",
@@ -222,6 +223,43 @@ def upload_media_bytes(media_bytes, media_type, filename):
         dropbox_path,
         mode=dropbox.files.WriteMode.overwrite
     )
+    return get_archive_media_url(media_type, filename)
+
+def upload_media_stream(file_stream, media_type, filename):
+    dropbox_path = f"/web-archives/{media_type}/{filename}"
+    dbx = get_dropbox_client()
+    first_chunk = file_stream.read(DROPBOX_UPLOAD_CHUNK_SIZE)
+
+    if not first_chunk:
+        dbx.files_upload(b"", dropbox_path, mode=dropbox.files.WriteMode.overwrite)
+        return get_archive_media_url(media_type, filename)
+
+    next_chunk = file_stream.read(DROPBOX_UPLOAD_CHUNK_SIZE)
+    if not next_chunk:
+        dbx.files_upload(first_chunk, dropbox_path, mode=dropbox.files.WriteMode.overwrite)
+        return get_archive_media_url(media_type, filename)
+
+    session = dbx.files_upload_session_start(first_chunk)
+    cursor = dropbox.files.UploadSessionCursor(
+        session_id=session.session_id,
+        offset=len(first_chunk)
+    )
+    commit = dropbox.files.CommitInfo(
+        path=dropbox_path,
+        mode=dropbox.files.WriteMode.overwrite
+    )
+
+    chunk = next_chunk
+    while True:
+        next_chunk = file_stream.read(DROPBOX_UPLOAD_CHUNK_SIZE)
+        if next_chunk:
+            dbx.files_upload_session_append_v2(chunk, cursor)
+            cursor.offset += len(chunk)
+            chunk = next_chunk
+        else:
+            dbx.files_upload_session_finish(chunk, cursor, commit)
+            break
+
     return get_archive_media_url(media_type, filename)
 
 def fetch_page_html(url):
@@ -722,7 +760,7 @@ def upload_media_direct():
             original_filename=uploaded_file.filename,
             content_type=content_type
         )
-        archive_url = upload_media_bytes(uploaded_file.read(), media_type, filename)
+        archive_url = upload_media_stream(uploaded_file.stream, media_type, filename)
 
         return jsonify({
             "message": "업로드 완료",
