@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, send_from_directory, Response
+from flask import Flask, request, jsonify, send_from_directory, Response, stream_with_context
 import dropbox
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse, urljoin, unquote, parse_qs, quote
@@ -19,6 +19,8 @@ APP_SECRET = os.getenv("DROPBOX_APP_SECRET")
 RAINDROP_ACCESS_TOKEN = os.getenv("RAINDROP_ACCESS_TOKEN")
 USE_PLAYWRIGHT_CAPTURE = os.getenv("USE_PLAYWRIGHT_CAPTURE", "true").lower() != "false"
 DEFAULT_SHARED_COLLECTION_TITLE = os.getenv("DEFAULT_SHARED_COLLECTION_TITLE", "축구")
+DROPBOX_TEMP_LINK_TTL_SECONDS = 60 * 60 * 3
+DROPBOX_TEMP_LINK_CACHE = {}
 CLIPPER_ALLOWED_ORIGINS = {
     "https://archive-saver-web.onrender.com",
     "http://127.0.0.1:5000",
@@ -162,6 +164,27 @@ def normalize_media_filename(filename):
 
 def get_archive_media_url(media_type, filename):
     return f"/archive-media/{media_type}/{quote(filename, safe='')}"
+
+def get_dropbox_temporary_link(dropbox_path):
+    now = time.time()
+    cached = DROPBOX_TEMP_LINK_CACHE.get(dropbox_path)
+    if cached and cached["expires_at"] > now:
+        return cached["link"]
+
+    result = get_dropbox_client().files_get_temporary_link(dropbox_path)
+    DROPBOX_TEMP_LINK_CACHE[dropbox_path] = {
+        "link": result.link,
+        "expires_at": now + DROPBOX_TEMP_LINK_TTL_SECONDS,
+    }
+    return result.link
+
+def iter_upstream_content(upstream_response, chunk_size=1024 * 256):
+    try:
+        for chunk in upstream_response.iter_content(chunk_size=chunk_size):
+            if chunk:
+                yield chunk
+    finally:
+        upstream_response.close()
 
 def infer_extension(filename, content_type, media_type):
     if filename:
@@ -1122,54 +1145,58 @@ def view_archive_media(media_type, filename):
 
         safe_filename = normalize_media_filename(filename)
         dropbox_path = f"/web-archives/{media_type}/{safe_filename}"
-        _, response = get_dropbox_client().files_download(dropbox_path)
-        content = response.content
+        temporary_link = get_dropbox_temporary_link(dropbox_path)
         content_type = mimetypes.guess_type(safe_filename)[0] or "application/octet-stream"
 
+        upstream_headers = {}
         range_header = request.headers.get("Range")
         if range_header:
-            match = re.match(r"bytes=(\d*)-(\d*)", range_header)
-            if match:
-                start_text, end_text = match.groups()
-                if start_text:
-                    start = int(start_text)
-                    end = int(end_text) if end_text else len(content) - 1
-                else:
-                    suffix_length = int(end_text) if end_text else len(content)
-                    start = max(len(content) - suffix_length, 0)
-                    end = len(content) - 1
+            upstream_headers["Range"] = range_header
 
-                end = min(end, len(content) - 1)
+        upstream_response = requests.get(
+            temporary_link,
+            headers=upstream_headers,
+            stream=True,
+            timeout=(5, 120)
+        )
 
-                if start <= end:
-                    partial = content[start:end + 1]
-                    return Response(
-                        partial,
-                        status=206,
-                        content_type=content_type,
-                        headers={
-                            "Accept-Ranges": "bytes",
-                            "Content-Range": f"bytes {start}-{end}/{len(content)}",
-                            "Content-Length": str(len(partial)),
-                            "Cache-Control": "private, max-age=86400"
-                        }
-                    )
+        if upstream_response.status_code >= 400:
+            error_headers = {
+                "Accept-Ranges": upstream_response.headers.get("Accept-Ranges", "bytes")
+            }
+            content_range = upstream_response.headers.get("Content-Range")
+            if content_range:
+                error_headers["Content-Range"] = content_range
 
-                return Response(
-                    status=416,
-                    headers={
-                        "Content-Range": f"bytes */{len(content)}",
-                        "Accept-Ranges": "bytes"
-                    }
-                )
+            return Response(
+                upstream_response.content,
+                status=upstream_response.status_code,
+                mimetype="text/plain",
+                headers=error_headers
+            )
+
+        response_headers = {
+            "Accept-Ranges": upstream_response.headers.get("Accept-Ranges", "bytes"),
+            "Cache-Control": "private, max-age=86400",
+            "X-Accel-Buffering": "no",
+        }
+        for header in ["Content-Length", "Content-Range", "ETag", "Last-Modified"]:
+            header_value = upstream_response.headers.get(header)
+            if header_value:
+                response_headers[header] = header_value
+
+        upstream_content_type = upstream_response.headers.get("Content-Type")
+        if upstream_content_type:
+            content_type = upstream_content_type.split(";", 1)[0] or content_type
 
         return Response(
-            content,
+            stream_with_context(iter_upstream_content(upstream_response)),
+            status=upstream_response.status_code,
             content_type=content_type,
             headers={
-                "Accept-Ranges": "bytes",
-                "Content-Length": str(len(content)),
-                "Cache-Control": "private, max-age=86400"
+                key: value
+                for key, value in response_headers.items()
+                if value is not None and value != ""
             }
         )
     except ValueError as e:
