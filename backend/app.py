@@ -51,7 +51,7 @@ def is_allowed_cors_origin(origin):
 
 @app.after_request
 def add_api_cors_headers(response):
-    if request.path not in ["/api/save-html", "/api/upload-media"]:
+    if request.path not in ["/api/save-html", "/api/upload-media", "/api/media-upload-link"]:
         return response
 
     origin = request.headers.get("Origin")
@@ -740,6 +740,43 @@ def download_and_save_media(media_url, base_url, media_type="media", use_base64=
 def log_save_phase(label, started_at):
     elapsed = time.perf_counter() - started_at
     print(f"⏱️ {label}: {elapsed:.2f}s")
+
+@app.route("/api/media-upload-link", methods=["POST"])
+def create_media_upload_link():
+    try:
+        data = request.json or {}
+        media_type = data.get("mediaType", "media")
+        if media_type not in ["videos", "audio", "images", "media"]:
+            return jsonify({"error": "Invalid media type"}), 400
+
+        source_url = data.get("sourceUrl", "")
+        original_filename = data.get("filename", "")
+        content_type = data.get("contentType", "")
+        filename = build_media_filename(
+            media_type,
+            source_url=source_url,
+            original_filename=original_filename,
+            content_type=content_type
+        )
+        dropbox_path = f"/web-archives/{media_type}/{filename}"
+        commit_info = dropbox.files.CommitInfo(
+            path=dropbox_path,
+            mode=dropbox.files.WriteMode.overwrite
+        )
+        upload_link = get_dropbox_client().files_get_temporary_upload_link(
+            commit_info,
+            duration=60 * 60
+        )
+
+        return jsonify({
+            "message": "업로드 링크 생성 완료",
+            "uploadUrl": upload_link.link,
+            "url": get_archive_media_url(media_type, filename),
+            "filename": filename,
+        })
+    except Exception as e:
+        print(f"아카이브 미디어 업로드 링크 생성 실패: {e}")
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/api/upload-media", methods=["POST"])
 def upload_media_direct():
