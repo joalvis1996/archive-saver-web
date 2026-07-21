@@ -13,3 +13,13 @@ services:
         fromEnvVar: DROPBOX_APP_SECRET
       - key: RAINDROP_ACCESS_TOKEN
         fromEnvVar: RAINDROP_ACCESS_TOKEN
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: ENCRYPTION_KEY
+        sync: false
