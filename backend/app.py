@@ -451,6 +451,8 @@ def is_security_challenge_html(html):
         title_text = soup.title.get_text(" ", strip=True) if soup.title else ""
         body_text = soup.body.get_text(" ", strip=True) if soup.body else soup.get_text(" ", strip=True)
         condensed_text = " ".join(body_text.split())
+        normalized_title = " ".join(title_text.lower().split())
+        normalized_html = html.lower()
 
         if "에펨코리아 보안 시스템" in title_text:
             return True
@@ -463,17 +465,54 @@ def is_security_challenge_html(html):
         marker_hits = sum(marker in condensed_text for marker in required_markers)
         has_help_email = "help@fmkorea.com" in condensed_text
 
-        return marker_hits >= 2 and has_help_email
+        if marker_hits >= 2 and has_help_email:
+            return True
+
+        namuwiki_title_markers = [
+            "잠시만 기다리십시오",
+            "보안 확인",
+        ]
+        namuwiki_body_markers = [
+            "보안 확인 수행 중",
+            "악의적인 봇으로부터 보호",
+            "사용자가 봇이 아님을 확인",
+        ]
+        namuwiki_title_hit = any(
+            marker in normalized_title for marker in namuwiki_title_markers
+        )
+        namuwiki_body_hits = sum(
+            marker in condensed_text for marker in namuwiki_body_markers
+        )
+        if namuwiki_title_hit and namuwiki_body_hits >= 2:
+            return True
+
+        cloudflare_title_markers = [
+            "just a moment",
+            "attention required",
+            "verify you are human",
+        ]
+        cloudflare_html_markers = [
+            "cf-chl-",
+            "cf-turnstile",
+            "challenge-platform",
+        ]
+        cloudflare_title_hit = any(
+            marker in normalized_title for marker in cloudflare_title_markers
+        )
+        cloudflare_html_hit = any(
+            marker in normalized_html for marker in cloudflare_html_markers
+        )
+        return cloudflare_title_hit and cloudflare_html_hit
     except Exception:
         return False
 
 def security_challenge_response():
     return jsonify({
         "error": (
-            "FMKorea가 Render 서버 IP를 보안 확인 페이지로 차단했습니다. "
-            "보안 페이지는 아카이브로 저장하지 않았습니다. "
-            "이 경우 서버가 대신 접속하는 방식으로는 원문/영상 저장이 어렵고, "
-            "휴대폰 브라우저에서 열린 페이지 내용을 직접 보내는 방식이 필요합니다."
+            "사이트가 서버의 자동 접속에 보안 확인을 요구했습니다. "
+            "실제 본문 대신 보안 확인 페이지가 감지되어 저장하지 않았습니다. "
+            "이 사이트는 휴대폰 브라우저에서 확인을 완료한 페이지 내용을 "
+            "앱이 직접 캡처하는 방식이 필요합니다."
         )
     }), 409
 
@@ -1283,7 +1322,7 @@ def save_html_direct():
                 captured_html = render_page_html_with_playwright(url)
                 log_save_phase("Playwright 캡처", playwright_started_at)
                 if is_security_challenge_html(captured_html):
-                    print("⚠️ Playwright 캡처가 FMKorea 보안 페이지로 차단되었습니다.")
+                    print("⚠️ Playwright 캡처에서 사이트 보안 확인 페이지를 감지했습니다.")
                     return security_challenge_response()
                 else:
                     html = captured_html
@@ -1298,7 +1337,7 @@ def save_html_direct():
             log_save_phase("서버 HTML fetch", fetch_started_at)
 
         if is_security_challenge_html(html):
-            print("⚠️ FMKorea 보안 페이지 감지: 저장을 중단합니다.")
+            print("⚠️ 사이트 보안 확인 페이지 감지: 저장을 중단합니다.")
             return security_challenge_response()
 
         archive_id = str(uuid4())
