@@ -4,3 +4,6 @@ dropbox
 requests
 beautifulsoup4
 playwright==1.51.0
+cryptography
+PyJWT
+supabase

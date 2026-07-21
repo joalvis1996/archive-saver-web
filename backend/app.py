@@ -1,7 +1,7 @@
 from flask import Flask, request, jsonify, send_from_directory, Response, redirect, stream_with_context
 import dropbox
 from bs4 import BeautifulSoup
-from urllib.parse import urlparse, urljoin, unquote, parse_qs, quote
+from urllib.parse import urlparse, urljoin, unquote, parse_qs, quote, urlencode
 import os
 import time
 import requests
@@ -10,6 +10,27 @@ import json
 import re
 import mimetypes
 from uuid import uuid4
+
+# .env 파일 로드 함수
+def load_env_file():
+    env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
+    if os.path.exists(env_path):
+        with open(env_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" in line:
+                    key, val = line.split("=", 1)
+                    key = key.strip()
+                    val = val.strip().strip('"').strip("'")
+                    if key and not os.getenv(key):
+                        os.environ[key] = val
+
+load_env_file()
+
+from auth_utils import login_required, verify_supabase_jwt
+from crypto_utils import encrypt_token, decrypt_token
 
 app = Flask(__name__, static_folder="../frontend/dist", static_url_path="/_static")
 
@@ -38,6 +59,151 @@ print("APP_SECRET:", "set" if APP_SECRET else "missing")
 print("RAINDROP_ACCESS_TOKEN:", "set" if RAINDROP_ACCESS_TOKEN else "missing")
 print("USE_PLAYWRIGHT_CAPTURE:", USE_PLAYWRIGHT_CAPTURE)
 print("=======================")
+
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+
+def get_supabase_admin_client():
+    from supabase import create_client
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+        raise ValueError("SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY가 환경 변수 혹은 .env에 누락되었습니다.")
+    return create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+
+def save_user_storage_token(user_id, provider, encrypted_token):
+    client = get_supabase_admin_client()
+    data = {
+        "user_id": user_id,
+        "provider": provider,
+        "encrypted_token": encrypted_token,
+        "updated_at": "now()"
+    }
+    client.table("user_storage_tokens").upsert(data).execute()
+
+def get_user_dropbox_client(refresh_token):
+    return dropbox.Dropbox(
+        app_key=APP_KEY,
+        app_secret=APP_SECRET,
+        oauth2_refresh_token=refresh_token
+    )
+
+def get_google_access_token(refresh_token):
+    client_id = os.getenv("GOOGLE_CLIENT_ID")
+    client_secret = os.getenv("GOOGLE_CLIENT_SECRET")
+    url = "https://oauth2.googleapis.com/token"
+    data = {
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "refresh_token": refresh_token,
+        "grant_type": "refresh_token"
+    }
+    res = requests.post(url, data=data, timeout=10)
+    res.raise_for_status()
+    return res.json().get("access_token")
+
+def get_or_create_google_folder(access_token, folder_name="ArchiveSaver"):
+    headers = {"Authorization": f"Bearer {access_token}"}
+    q = f"name = '{folder_name}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
+    search_url = f"https://www.googleapis.com/drive/v3/files?q={quote(q)}&fields=files(id)"
+    res = requests.get(search_url, headers=headers, timeout=10)
+    res.raise_for_status()
+    files = res.json().get("files", [])
+    if files:
+        return files[0].get("id")
+    
+    create_url = "https://www.googleapis.com/drive/v3/files"
+    body = {
+        "name": folder_name,
+        "mimeType": "application/vnd.google-apps.folder"
+    }
+    res = requests.post(create_url, headers=headers, json=body, timeout=10)
+    res.raise_for_status()
+    return res.json().get("id")
+
+def get_google_subfolder_id(access_token, parent_id, subfolder_name):
+    headers = {"Authorization": f"Bearer {access_token}"}
+    q = f"name = '{subfolder_name}' and '{parent_id}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
+    search_url = f"https://www.googleapis.com/drive/v3/files?q={quote(q)}&fields=files(id)"
+    res = requests.get(search_url, headers=headers, timeout=10)
+    res.raise_for_status()
+    files = res.json().get("files", [])
+    if files:
+        return files[0].get("id")
+    
+    create_url = "https://www.googleapis.com/drive/v3/files"
+    body = {
+        "name": subfolder_name,
+        "mimeType": "application/vnd.google-apps.folder",
+        "parents": [parent_id]
+    }
+    res = requests.post(create_url, headers=headers, json=body, timeout=10)
+    res.raise_for_status()
+    return res.json().get("id")
+
+def upload_to_google_drive(access_token, folder_id, filename, file_bytes, content_type):
+    headers = {"Authorization": f"Bearer {access_token}"}
+    metadata = {
+        "name": filename,
+        "parents": [folder_id]
+    }
+    files = {
+        "metadata": (None, json.dumps(metadata), "application/json; charset=UTF-8"),
+        "file": (filename, file_bytes, content_type)
+    }
+    url = "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,webViewLink"
+    res = requests.post(url, headers=headers, files=files, timeout=30)
+    res.raise_for_status()
+    res_data = res.json()
+    
+    file_id = res_data.get("id")
+    
+    # 누구나 링크가 있으면 읽을 수 있도록 권한 설정
+    try:
+        perm_url = f"https://www.googleapis.com/drive/v3/files/{file_id}/permissions"
+        perm_body = {
+            "role": "reader",
+            "type": "anyone"
+        }
+        requests.post(perm_url, headers=headers, json=perm_body, timeout=10)
+    except Exception as e:
+        print(f"Warning: Google Drive 파일 권한 설정 실패: {e}")
+        
+    return file_id, res_data.get("webViewLink")
+
+def download_from_google_drive(access_token, file_id):
+    headers = {"Authorization": f"Bearer {access_token}"}
+    url = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media"
+    res = requests.get(url, headers=headers, timeout=30)
+    res.raise_for_status()
+    return res.content
+
+def upload_file_to_user_storage(file_bytes, media_type, filename, content_type, storage_config):
+    provider = storage_config["provider"]
+    if provider == "dropbox":
+        dbx = storage_config["dbx_client"]
+        dropbox_path = f"/web-archives/{media_type}/{filename}"
+        dbx.files_upload(
+            file_bytes,
+            dropbox_path,
+            mode=dropbox.files.WriteMode.overwrite
+        )
+        
+        # 공유 링크 조회 혹은 생성
+        links = dbx.sharing_list_shared_links(path=dropbox_path).links
+        if links:
+            base_url = links[0].url.split("?")[0]
+            return f"{base_url}?raw=1"
+        
+        settings = dropbox.sharing.SharedLinkSettings(requested_visibility=dropbox.sharing.RequestedVisibility.public)
+        base_url = dbx.sharing_create_shared_link_with_settings(dropbox_path, settings).url.split("?")[0]
+        return f"{base_url}?raw=1"
+        
+    elif provider == "google":
+        access_token = storage_config["access_token"]
+        root_folder_id = storage_config["root_folder_id"]
+        
+        subfolder_id = get_google_subfolder_id(access_token, root_folder_id, media_type)
+        file_id, _ = upload_to_google_drive(access_token, subfolder_id, filename, file_bytes, content_type)
+        return f"https://drive.google.com/uc?export=download&id={file_id}"
 
 def is_allowed_cors_origin(origin):
     if not origin:
@@ -695,7 +861,7 @@ def add_archive_media_fallbacks(soup):
             link.string = "영상 파일 열기" if media.name == "video" else "오디오 파일 열기"
             media.insert_after(link)
 
-def download_and_save_media(media_url, base_url, media_type="media", use_base64=True):
+def download_and_save_media(media_url, base_url, media_type="media", use_base64=True, storage_config=None):
     """
     미디어 파일을 다운로드하고 처리합니다.
     
@@ -703,43 +869,215 @@ def download_and_save_media(media_url, base_url, media_type="media", use_base64=
         media_url: 미디어 파일의 URL (상대 또는 절대)
         base_url: 기본 URL (상대 URL을 절대 URL로 변환하기 위함)
         media_type: 미디어 타입 ("videos", "images", "audio" 등)
-        use_base64: True이면 base64로 인코딩하여 반환, False이면 Dropbox 링크 반환
+        use_base64: True이면 base64로 인코딩하여 반환, False이면 사용자 저장소 링크 반환
+        storage_config: 사용자 스토리지 설정 딕셔너리
     
     Returns:
-        data URI 또는 공유 링크 URL 또는 None (실패 시)
+        data URI 또는 저장소의 파일 링크 URL 또는 None (실패 시)
     """
     if use_base64:
         # base64로 인코딩하여 반환 (HTML에 직접 포함)
         return download_and_convert_to_base64(media_url, base_url)
-    else:
-        # 기존 방식: Dropbox에 저장하고 링크 반환
-        try:
-            full_url = urljoin(base_url, media_url)
-            parsed_url = urlparse(full_url)
-            
-            # 파일명 추출
-            original_filename = os.path.basename(parsed_url.path)
-            
-            # 파일 다운로드
-            response = requests.get(full_url, headers={"Referer": base_url}, timeout=30, stream=True)
-            response.raise_for_status()
-            
-            media_bytes = b"".join(response.iter_content(chunk_size=8192))
-            filename = build_media_filename(
-                media_type,
-                source_url=full_url,
-                original_filename=original_filename,
-                content_type=response.headers.get("Content-Type", "")
-            )
-            
-            return upload_media_bytes(media_bytes, media_type, filename)
-        except Exception as e:
-            print(f"❌ 미디어 다운로드 실패 ({media_type}): {media_url}, {e}")
-            return None
+    
+    if not storage_config:
+        print("⚠️ storage_config가 누락되어 미디어를 업로드할 수 없습니다.")
+        return None
+        
+    try:
+        full_url = urljoin(base_url, media_url)
+        parsed_url = urlparse(full_url)
+        
+        # 파일명 추출
+        original_filename = os.path.basename(parsed_url.path)
+        
+        # 파일 다운로드
+        response = requests.get(full_url, headers={"Referer": base_url}, timeout=30, stream=True)
+        response.raise_for_status()
+        
+        media_bytes = b"".join(response.iter_content(chunk_size=8192))
+        filename = build_media_filename(
+            media_type,
+            source_url=full_url,
+            original_filename=original_filename,
+            content_type=response.headers.get("Content-Type", "")
+        )
+        content_type = response.headers.get("Content-Type", "application/octet-stream")
+        
+        return upload_file_to_user_storage(media_bytes, media_type, filename, content_type, storage_config)
+    except Exception as e:
+        print(f"❌ 미디어 다운로드 실패 ({media_type}): {media_url}, {e}")
+        return None
 
 def log_save_phase(label, started_at):
     elapsed = time.perf_counter() - started_at
     print(f"⏱️ {label}: {elapsed:.2f}s")
+
+# -----------------------------------------------------------------------------
+# OAuth 및 사용자 관리 Endpoints
+# -----------------------------------------------------------------------------
+
+@app.route("/api/auth/dropbox/connect")
+def dropbox_connect():
+    token = request.args.get("token")
+    if not token:
+        return "인증 토큰(token)이 누락되었습니다.", 400
+    try:
+        verify_supabase_jwt(token)
+    except Exception as e:
+        return f"유효하지 않은 인증 토큰입니다: {e}", 401
+    
+    redirect_uri = f"{get_request_origin()}/api/auth/dropbox/callback"
+    authorize_url = (
+        "https://www.dropbox.com/oauth2/authorize"
+        f"?client_id={APP_KEY}"
+        "&response_type=code"
+        f"&redirect_uri={quote(redirect_uri)}"
+        "&token_access_type=offline"
+        f"&state={quote(token)}"
+    )
+    return redirect(authorize_url)
+
+@app.route("/api/auth/dropbox/callback")
+def dropbox_callback():
+    code = request.args.get("code")
+    token_state = request.args.get("state")
+    if not code or not token_state:
+        return "인증 코드(code) 혹은 상태값(state)이 누락되었습니다.", 400
+        
+    try:
+        user_data = verify_supabase_jwt(token_state)
+        user_id = user_data.get("sub")
+    except Exception as e:
+        return f"인증 세션이 유효하지 않습니다: {e}", 401
+        
+    redirect_uri = f"{get_request_origin()}/api/auth/dropbox/callback"
+    token_url = "https://api.dropboxapi.com/oauth2/token"
+    data = {
+        "code": code,
+        "grant_type": "authorization_code",
+        "client_id": APP_KEY,
+        "client_secret": APP_SECRET,
+        "redirect_uri": redirect_uri
+    }
+    
+    res = requests.post(token_url, data=data, timeout=15)
+    if res.status_code != 200:
+        return f"Dropbox 토큰 갱신 실패: {res.text}", 400
+        
+    res_data = res.json()
+    refresh_token = res_data.get("refresh_token")
+    if not refresh_token:
+        return "Dropbox로부터 refresh_token을 발급받지 못했습니다. 앱 설정을 확인해주세요.", 400
+        
+    encrypted = encrypt_token(refresh_token)
+    try:
+        save_user_storage_token(user_id, "dropbox", encrypted)
+    except Exception as e:
+        return f"데이터베이스 저장 실패: {e}", 500
+        
+    return "<h3>Dropbox 스토리지 연동이 완료되었습니다!</h3><p>이 창을 닫고 앱으로 돌아가세요.</p>"
+
+@app.route("/api/auth/google/connect")
+def google_connect():
+    token = request.args.get("token")
+    if not token:
+        return "인증 토큰(token)이 누락되었습니다.", 400
+    try:
+        verify_supabase_jwt(token)
+    except Exception as e:
+        return f"유효하지 않은 인증 토큰입니다: {e}", 401
+        
+    client_id = os.getenv("GOOGLE_CLIENT_ID")
+    if not client_id:
+        return "서버에 GOOGLE_CLIENT_ID가 설정되지 않았습니다.", 500
+        
+    redirect_uri = f"{get_request_origin()}/api/auth/google/callback"
+    authorize_url = (
+        "https://accounts.google.com/o/oauth2/v2/auth"
+        f"?client_id={client_id}"
+        "&response_type=code"
+        f"&redirect_uri={quote(redirect_uri)}"
+        f"&scope={quote('https://www.googleapis.com/auth/drive.file')}"
+        "&access_type=offline"
+        "&prompt=consent"
+        f"&state={quote(token)}"
+    )
+    return redirect(authorize_url)
+
+@app.route("/api/auth/google/callback")
+def google_callback():
+    code = request.args.get("code")
+    token_state = request.args.get("state")
+    if not code or not token_state:
+        return "인증 코드(code) 혹은 상태값(state)이 누락되었습니다.", 400
+        
+    try:
+        user_data = verify_supabase_jwt(token_state)
+        user_id = user_data.get("sub")
+    except Exception as e:
+        return f"인증 세션이 유효하지 않습니다: {e}", 401
+        
+    client_id = os.getenv("GOOGLE_CLIENT_ID")
+    client_secret = os.getenv("GOOGLE_CLIENT_SECRET")
+    redirect_uri = f"{get_request_origin()}/api/auth/google/callback"
+    
+    token_url = "https://oauth2.googleapis.com/token"
+    data = {
+        "code": code,
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "redirect_uri": redirect_uri,
+        "grant_type": "authorization_code"
+    }
+    
+    res = requests.post(token_url, data=data, timeout=15)
+    if res.status_code != 200:
+        return f"Google 토큰 갱신 실패: {res.text}", 400
+        
+    res_data = res.json()
+    refresh_token = res_data.get("refresh_token")
+    if not refresh_token:
+        return "Google로부터 refresh_token을 발급받지 못했습니다. 구글 계정 보안 설정에서 앱 권한을 삭제하고 다시 시도해 주세요.", 400
+        
+    encrypted = encrypt_token(refresh_token)
+    try:
+        save_user_storage_token(user_id, "google", encrypted)
+    except Exception as e:
+        return f"데이터베이스 저장 실패: {e}", 500
+        
+    return "<h3>Google Drive 스토리지 연동이 완료되었습니다!</h3><p>이 창을 닫고 앱으로 돌아가세요.</p>"
+
+@app.route("/api/user/storage-status", methods=["GET"])
+@login_required
+def get_user_storage_status():
+    user_id = request.user.get("id")
+    try:
+        client = get_supabase_admin_client()
+        res = client.table("user_storage_tokens").select("provider").eq("user_id", user_id).execute()
+        items = res.data
+        if items:
+            return jsonify({
+                "connected": True,
+                "provider": items[0].get("provider")
+            })
+        else:
+            return jsonify({
+                "connected": False,
+                "provider": None
+            })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/user/storage-disconnect", methods=["POST"])
+@login_required
+def disconnect_user_storage():
+    user_id = request.user.get("id")
+    try:
+        client = get_supabase_admin_client()
+        client.table("user_storage_tokens").delete().eq("user_id", user_id).execute()
+        return jsonify({"message": "스토리지 연결이 해제되었습니다."})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/api/media-upload-link", methods=["POST"])
 def create_media_upload_link():
@@ -810,6 +1148,7 @@ def upload_media_direct():
 
 
 @app.route("/api/save-html", methods=["POST"])
+@login_required
 def save_html_direct():
     try:
         print("=== /api/save-html 호출됨 ===")
@@ -817,24 +1156,39 @@ def save_html_direct():
         data = request.json
         url = data.get("url")
         html = data.get("html")
-        collection_id = data.get("collectionId")
-        collection_title = data.get("collectionTitle") or DEFAULT_SHARED_COLLECTION_TITLE
         client_capture_mode = data.get("clientCaptureMode")
         lightweight_capture_mode = client_capture_mode == "android-webview"
 
         if not url:
             return jsonify({"error": "Missing URL"}), 400
 
-        if is_security_challenge_html(html):
-            print("⚠️ 제공된 HTML이 FMKorea 보안 페이지입니다.")
-            return security_challenge_response()
-
-        if not collection_id:
-            collection_id = find_collection_id_by_title(collection_title)
-            print(f"ℹ️ 컬렉션 조회 완료: {collection_title} -> {collection_id}")
-
-        if not collection_id:
-            return jsonify({"error": f"'{collection_title}' 컬렉션을 찾지 못했습니다."}), 400
+        user_id = request.user.get("id")
+        
+        # 유저 스토리지 정보 조회
+        supabase_client = get_supabase_admin_client()
+        res = supabase_client.table("user_storage_tokens").select("provider, encrypted_token").eq("user_id", user_id).execute()
+        tokens = res.data
+        if not tokens:
+            return jsonify({"error": "연동된 클라우드 스토리지가 없습니다. 설정에서 Dropbox 또는 Google Drive를 연결해주세요."}), 400
+            
+        provider = tokens[0].get("provider")
+        encrypted_token = tokens[0].get("encrypted_token")
+        
+        from crypto_utils import decrypt_token
+        refresh_token = decrypt_token(encrypted_token)
+        
+        # storage_config 생성
+        storage_config = {
+            "provider": provider,
+            "refresh_token": refresh_token
+        }
+        if provider == "dropbox":
+            storage_config["dbx_client"] = get_user_dropbox_client(refresh_token)
+        elif provider == "google":
+            access_token = get_google_access_token(refresh_token)
+            storage_config["access_token"] = access_token
+            root_folder_id = get_or_create_google_folder(access_token, "ArchiveSaver")
+            storage_config["root_folder_id"] = root_folder_id
 
         provided_html = html
         html = provided_html
@@ -871,9 +1225,10 @@ def save_html_direct():
             print("⚠️ FMKorea 보안 페이지 감지: 저장을 중단합니다.")
             return security_challenge_response()
 
-        parsed = urlparse(url)
-        filename = generate_filename(parsed)
+        archive_id = str(uuid4())
+        filename = f"{archive_id}.html"
         filepath = f"/tmp/{filename}"
+        parsed = urlparse(url)
 
         soup = BeautifulSoup(html, "html.parser")
         html_parse_started_at = time.perf_counter()
@@ -907,7 +1262,7 @@ def save_html_direct():
             for img in soup.find_all("img"):
                 img_src = img.get("src")
                 if img_src:
-                    shared_link = download_and_save_media(img_src, url, "images")
+                    shared_link = download_and_save_media(img_src, url, "images", storage_config=storage_config)
                     if shared_link:
                         img["src"] = shared_link
                         image_saved_count += 1
@@ -916,7 +1271,7 @@ def save_html_direct():
                 for lazy_attr in ["data-src", "data-lazy-src", "data-original", "data-url"]:
                     lazy_src = img.get(lazy_attr)
                     if lazy_src:
-                        shared_link = download_and_save_media(lazy_src, url, "images")
+                        shared_link = download_and_save_media(lazy_src, url, "images", storage_config=storage_config)
                         if shared_link:
                             img[lazy_attr] = shared_link
                             if not img.get("src"):
@@ -936,7 +1291,7 @@ def save_html_direct():
                             image_url = parts[0]
                             descriptor = " ".join(parts[1:]) if len(parts) > 1 else ""
                             
-                            shared_link = download_and_save_media(image_url, url, "images")
+                            shared_link = download_and_save_media(image_url, url, "images", storage_config=storage_config)
                             if shared_link:
                                 if descriptor:
                                     srcset_parts.append(f"{shared_link} {descriptor}")
@@ -959,10 +1314,9 @@ def save_html_direct():
             # video 태그의 src 속성 처리
             print("🎥 video 태그 처리 중...")
             for video in soup.find_all("video"):
-                # src 속성 처리
                 video_src = video.get("src")
                 if video_src:
-                    shared_link = download_and_save_media(video_src, url, "videos", use_base64=False)
+                    shared_link = download_and_save_media(video_src, url, "videos", use_base64=False, storage_config=storage_config)
                     if shared_link:
                         video["src"] = shared_link
                         video_saved_count += 1
@@ -971,7 +1325,7 @@ def save_html_direct():
                 for lazy_attr in ["data-src", "data-lazy-src", "data-original", "data-url"]:
                     lazy_src = video.get(lazy_attr)
                     if lazy_src:
-                        shared_link = download_and_save_media(lazy_src, url, "videos", use_base64=False)
+                        shared_link = download_and_save_media(lazy_src, url, "videos", use_base64=False, storage_config=storage_config)
                         if shared_link:
                             video[lazy_attr] = shared_link
                             if not video.get("src"):
@@ -981,7 +1335,7 @@ def save_html_direct():
                 
                 poster_src = video.get("poster")
                 if poster_src:
-                    shared_link = download_and_save_media(poster_src, url, "images", use_base64=True)
+                    shared_link = download_and_save_media(poster_src, url, "images", use_base64=True, storage_config=storage_config)
                     if shared_link:
                         video["poster"] = shared_link
                         image_saved_count += 1
@@ -992,7 +1346,7 @@ def save_html_direct():
                 for source in video.find_all("source"):
                     source_src = source.get("src")
                     if source_src:
-                        shared_link = download_and_save_media(source_src, url, "videos", use_base64=False)
+                        shared_link = download_and_save_media(source_src, url, "videos", use_base64=False, storage_config=storage_config)
                         if shared_link:
                             source["src"] = shared_link
                             video_saved_count += 1
@@ -1001,7 +1355,7 @@ def save_html_direct():
                     for lazy_attr in ["data-src", "data-lazy-src", "data-original", "data-url"]:
                         lazy_src = source.get(lazy_attr)
                         if lazy_src:
-                            shared_link = download_and_save_media(lazy_src, url, "videos", use_base64=False)
+                            shared_link = download_and_save_media(lazy_src, url, "videos", use_base64=False, storage_config=storage_config)
                             if shared_link:
                                 source[lazy_attr] = shared_link
                                 if not source.get("src"):
@@ -1013,7 +1367,7 @@ def save_html_direct():
             for audio in soup.find_all("audio"):
                 audio_src = audio.get("src")
                 if audio_src:
-                    shared_link = download_and_save_media(audio_src, url, "audio", use_base64=False)
+                    shared_link = download_and_save_media(audio_src, url, "audio", use_base64=False, storage_config=storage_config)
                     if shared_link:
                         audio["src"] = shared_link
                         audio_saved_count += 1
@@ -1023,7 +1377,7 @@ def save_html_direct():
                 for source in audio.find_all("source"):
                     source_src = source.get("src")
                     if source_src:
-                        shared_link = download_and_save_media(source_src, url, "audio", use_base64=False)
+                        shared_link = download_and_save_media(source_src, url, "audio", use_base64=False, storage_config=storage_config)
                         if shared_link:
                             source["src"] = shared_link
                             audio_saved_count += 1
@@ -1049,7 +1403,7 @@ def save_html_direct():
                                 image_url = parts[0]
                                 descriptor = " ".join(parts[1:]) if len(parts) > 1 else ""
                                 
-                                shared_link = download_and_save_media(image_url, url, "images")
+                                shared_link = download_and_save_media(image_url, url, "images", storage_config=storage_config)
                                 if shared_link:
                                     if descriptor:
                                         srcset_parts.append(f"{shared_link} {descriptor}")
@@ -1072,46 +1426,61 @@ def save_html_direct():
             f.write(str(soup))
         log_save_phase("임시 HTML 쓰기", write_started_at)
 
-        dbx = get_dropbox_client()
-        dropbox_path = f"/web-archives/{filename}"
+        # HTML 업로드 처리
         upload_started_at = time.perf_counter()
         with open(filepath, "rb") as f:
-            dbx.files_upload(f.read(), dropbox_path, mode=dropbox.files.WriteMode.overwrite)
-        log_save_phase("Dropbox HTML 업로드", upload_started_at)
+            html_bytes = f.read()
 
-        archive_url = get_archive_url(filename)
-        # Dropbox 링크는 백업용으로 유지하고, Raindrop에는 Archive Saver 뷰어 URL을 저장합니다.
-        shared_url = get_shared_link(dropbox_path, use_raw=False)
+        if provider == "dropbox":
+            dbx = storage_config["dbx_client"]
+            dropbox_path = f"/web-archives/{filename}"
+            dbx.files_upload(
+                html_bytes,
+                dropbox_path,
+                mode=dropbox.files.WriteMode.overwrite
+            )
+            # 공유 링크 생성
+            links = dbx.sharing_list_shared_links(path=dropbox_path).links
+            if links:
+                shared_url = links[0].url.split("?")[0]
+            else:
+                settings = dropbox.sharing.SharedLinkSettings(requested_visibility=dropbox.sharing.RequestedVisibility.public)
+                shared_url = dbx.sharing_create_shared_link_with_settings(dropbox_path, settings).url.split("?")[0]
+            storage_file_id = dropbox_path
+            
+        elif provider == "google":
+            # Google Drive 업로드
+            file_id, shared_url = upload_to_google_drive(
+                access_token=storage_config["access_token"],
+                folder_id=storage_config["root_folder_id"],
+                filename=filename,
+                file_bytes=html_bytes,
+                content_type="text/html"
+            )
+            storage_file_id = file_id
+
+        log_save_phase("스토리지 HTML 업로드", upload_started_at)
+
+        archive_url = f"{get_request_origin()}/archive/{archive_id}"
         title = soup.title.string.strip() if soup.title else "Untitled"
-        domain_tag = parsed.netloc
-        cover_image_url = extract_cover_image(soup, url)
 
-        raindrop_headers = {
-            "Authorization": f"Bearer {RAINDROP_ACCESS_TOKEN}",
-            "Content-Type": "application/json"
-        }
-        payload = {
-            "link": archive_url,
+        # Supabase DB에 아카이브 기록 저장
+        archive_data = {
+            "id": archive_id,
+            "user_id": user_id,
+            "url": url,
             "title": title,
-            "excerpt": url,
-            "note": f"Original URL: {url}\nDropbox backup: {shared_url}",
-            "tags": [domain_tag],
-            "collection": {"$id": collection_id}
+            "storage_provider": provider,
+            "storage_shared_link": shared_url,
+            "storage_file_id": storage_file_id
         }
-        if cover_image_url:
-            payload["cover"] = cover_image_url
-
-        raindrop_started_at = time.perf_counter()
-        r = requests.post("https://api.raindrop.io/rest/v1/raindrop", headers=raindrop_headers, json=payload)
-        log_save_phase("Raindrop 저장", raindrop_started_at)
-        log_save_phase("전체 저장 요청", request_started_at)
-        if r.status_code == 200:
-            return jsonify({
-                "message": "저장 완료!",
-                "archiveUrl": archive_url
-            })
-        else:
-            return jsonify({"error": f"Raindrop 저장 실패: {r.status_code}"}), 500
+        supabase_client.table("archives").insert(archive_data).execute()
+        
+        log_save_phase("전체 저장 요청 완료", request_started_at)
+        return jsonify({
+            "message": "저장 완료!",
+            "archiveUrl": archive_url
+        })
 
     except Exception as e:
         print("예외 발생:", str(e))
@@ -1177,12 +1546,42 @@ def manifest():
 @app.route("/archive/<path:archive_id>")
 def view_archive(archive_id):
     try:
-        filename = normalize_archive_filename(archive_id)
-        dropbox_path = f"/web-archives/{filename}"
-        _, response = get_dropbox_client().files_download(dropbox_path)
-        html = response.content.decode("utf-8", errors="replace")
-        html = rewrite_dropbox_media_links(html)
-        html = rewrite_archive_media_origin_links(html)
+        # 1. DB에서 아카이브 메타데이터 조회
+        client = get_supabase_admin_client()
+        res = client.table("archives").select("*").eq("id", archive_id).execute()
+        archives = res.data
+        if not archives:
+            return Response("Archive not found", status=404, mimetype="text/plain")
+            
+        archive = archives[0]
+        user_id = archive.get("user_id")
+        provider = archive.get("storage_provider")
+        storage_file_id = archive.get("storage_file_id")
+        
+        # 2. 유저 스토리지 토큰 조회 및 복호화
+        token_res = client.table("user_storage_tokens").select("encrypted_token").eq("user_id", user_id).execute()
+        tokens = token_res.data
+        if not tokens:
+            return Response("User storage configuration missing", status=400, mimetype="text/plain")
+            
+        from crypto_utils import decrypt_token
+        refresh_token = decrypt_token(tokens[0].get("encrypted_token"))
+        
+        # 3. 파일 다운로드
+        if provider == "dropbox":
+            dbx = get_user_dropbox_client(refresh_token)
+            # storage_file_id는 dropbox_path에 해당합니다.
+            _, response = dbx.files_download(storage_file_id)
+            html = response.content.decode("utf-8", errors="replace")
+        elif provider == "google":
+            access_token = get_google_access_token(refresh_token)
+            # storage_file_id는 google_file_id에 해당합니다.
+            html_bytes = download_from_google_drive(access_token, storage_file_id)
+            html = html_bytes.decode("utf-8", errors="replace")
+        else:
+            return Response("Unsupported storage provider", status=400, mimetype="text/plain")
+            
+        # 4. 보안 및 미디어 후처리
         soup = BeautifulSoup(html, "html.parser")
         add_archive_media_fallbacks(soup)
         html = str(soup)
@@ -1206,11 +1605,9 @@ def view_archive(archive_id):
                 "X-Robots-Tag": "noindex, nofollow"
             }
         )
-    except ValueError as e:
-        return Response(str(e), status=400, mimetype="text/plain")
     except Exception as e:
         print(f"아카이브 로드 실패: {archive_id}, {e}")
-        return Response("Archive not found", status=404, mimetype="text/plain")
+        return Response("Archive load failed", status=500, mimetype="text/plain")
 
 @app.route("/archive-media/<media_type>/<path:filename>")
 def view_archive_media(media_type, filename):
@@ -1286,6 +1683,119 @@ def view_archive_media(media_type, filename):
     except Exception as e:
         print(f"아카이브 미디어 로드 실패: {media_type}/{filename}, {e}")
         return Response("Archive media not found", status=404, mimetype="text/plain")
+
+@app.route("/auth/reset-password")
+def password_recovery_bridge():
+    """Open the mobile app from a user-initiated browser action.
+
+    Some mobile browsers block a server redirect directly to a custom URL
+    scheme. Supabase redirects here first, then this page offers an explicit
+    button while preserving the PKCE authorization code.
+    """
+    forwarded_params = []
+    allowed_params = {
+        "code",
+        "error",
+        "error_code",
+        "error_description",
+        "type",
+    }
+    for key in allowed_params:
+        for value in request.args.getlist(key):
+            forwarded_params.append((key, value))
+
+    query_string = urlencode(forwarded_params)
+    app_url = "com.archivesaver.frontendflutter://reset-password"
+    if query_string:
+        app_url = f"{app_url}?{query_string}"
+
+    error_description = request.args.get("error_description", "").strip()
+    if error_description:
+        title = "복구 링크를 사용할 수 없습니다"
+        description = "링크가 만료되었거나 이미 사용되었습니다. 앱에서 복구 이메일을 다시 요청해주세요."
+        action_html = ""
+        auto_open_script = ""
+    elif request.args.get("code"):
+        title = "비밀번호 재설정"
+        description = "아래 버튼을 누르면 Archive Saver 앱에서 새 비밀번호를 설정할 수 있습니다."
+        action_html = f'<a class="button" href="{app_url}">앱에서 비밀번호 변경</a>'
+        auto_open_script = f"""
+            <script>
+              window.setTimeout(function () {{
+                window.location.href = {json.dumps(app_url)};
+              }}, 500);
+            </script>
+        """
+    else:
+        title = "잘못된 복구 링크입니다"
+        description = "앱에서 비밀번호 복구 이메일을 다시 요청해주세요."
+        action_html = ""
+        auto_open_script = ""
+
+    page = f"""<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="referrer" content="no-referrer">
+    <title>{title}</title>
+    <style>
+      :root {{ color-scheme: dark; }}
+      * {{ box-sizing: border-box; }}
+      body {{
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        padding: 24px;
+        background: #111827;
+        color: #f9fafb;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }}
+      main {{
+        width: min(100%, 420px);
+        padding: 32px 24px;
+        border: 1px solid #374151;
+        border-radius: 16px;
+        background: #1f2937;
+        text-align: center;
+      }}
+      .icon {{ font-size: 52px; }}
+      h1 {{ margin: 16px 0 10px; font-size: 24px; }}
+      p {{ margin: 0; color: #d1d5db; line-height: 1.6; }}
+      .button {{
+        display: block;
+        margin-top: 28px;
+        padding: 14px 18px;
+        border-radius: 10px;
+        background: #0a84ff;
+        color: white;
+        font-weight: 700;
+        text-decoration: none;
+      }}
+      .hint {{ margin-top: 18px; font-size: 13px; color: #9ca3af; }}
+    </style>
+  </head>
+  <body>
+    <main>
+      <div class="icon">🔐</div>
+      <h1>{title}</h1>
+      <p>{description}</p>
+      {action_html}
+      <p class="hint">앱이 자동으로 열리지 않으면 위 버튼을 눌러주세요.</p>
+    </main>
+    {auto_open_script}
+  </body>
+</html>"""
+    return Response(
+        page,
+        mimetype="text/html",
+        headers={
+            "Cache-Control": "no-store",
+            "X-Robots-Tag": "noindex, nofollow",
+        },
+    )
+
 
 @app.route("/")
 def index():
