@@ -139,7 +139,7 @@ def get_google_subfolder_id(access_token, parent_id, subfolder_name):
     res.raise_for_status()
     return res.json().get("id")
 
-def upload_to_google_drive(access_token, folder_id, filename, file_bytes, content_type):
+def upload_to_google_drive(access_token, folder_id, filename, file_bytes, content_type, make_public=True):
     headers = {"Authorization": f"Bearer {access_token}"}
     metadata = {
         "name": filename,
@@ -156,16 +156,18 @@ def upload_to_google_drive(access_token, folder_id, filename, file_bytes, conten
     
     file_id = res_data.get("id")
     
-    # 누구나 링크가 있으면 읽을 수 있도록 권한 설정
-    try:
-        perm_url = f"https://www.googleapis.com/drive/v3/files/{file_id}/permissions"
-        perm_body = {
-            "role": "reader",
-            "type": "anyone"
-        }
-        requests.post(perm_url, headers=headers, json=perm_body, timeout=10)
-    except Exception as e:
-        print(f"Warning: Google Drive 파일 권한 설정 실패: {e}")
+    # 일반 웹 아카이브만 기존 호환성을 위해 공개 링크를 생성합니다.
+    # 휴대폰 스크린샷은 민감한 정보가 포함될 수 있으므로 비공개로 유지합니다.
+    if make_public:
+        try:
+            perm_url = f"https://www.googleapis.com/drive/v3/files/{file_id}/permissions"
+            perm_body = {
+                "role": "reader",
+                "type": "anyone"
+            }
+            requests.post(perm_url, headers=headers, json=perm_body, timeout=10)
+        except Exception as e:
+            print(f"Warning: Google Drive 파일 권한 설정 실패: {e}")
         
     return file_id, res_data.get("webViewLink")
 
@@ -1600,6 +1602,136 @@ def save_html_direct():
     except Exception as e:
         print("예외 발생:", str(e))
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/save-screenshot", methods=["POST"])
+@login_required
+def save_screenshot_direct():
+    """휴대폰에 실제로 표시된 화면을 원본 PNG로 비공개 저장합니다."""
+    try:
+        if request.content_length and request.content_length > 30 * 1024 * 1024:
+            return jsonify({"error": "스크린샷 파일이 너무 큽니다."}), 413
+
+        uploaded_file = request.files.get("screenshot")
+        if not uploaded_file:
+            return jsonify({"error": "스크린샷 파일이 없습니다."}), 400
+        screenshot_bytes = uploaded_file.read()
+        if not screenshot_bytes or len(screenshot_bytes) > 25 * 1024 * 1024:
+            return jsonify({"error": "스크린샷 파일 크기가 올바르지 않습니다."}), 400
+        if not screenshot_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+            return jsonify({"error": "PNG 형식의 스크린샷만 저장할 수 있습니다."}), 400
+
+        user_id = request.user.get("id")
+        source_package = (request.form.get("sourcePackage") or "unknown").strip()[:200]
+        app_label = (request.form.get("appLabel") or "화면 캡처").strip()[:200]
+        captured_at = (request.form.get("capturedAt") or "").strip()[:80]
+        archive_id = str(uuid4())
+        filename = f"{archive_id}.png"
+
+        client = get_supabase_admin_client()
+        token_res = client.table("user_storage_tokens").select(
+            "provider, encrypted_token"
+        ).eq("user_id", user_id).execute()
+        if not token_res.data:
+            return jsonify({"error": "연동된 클라우드 스토리지가 없습니다."}), 400
+
+        provider = token_res.data[0].get("provider")
+        refresh_token = decrypt_token(token_res.data[0].get("encrypted_token"))
+        shared_url = None
+        if provider == "dropbox":
+            storage_file_id = f"/web-archives/screenshots/{filename}"
+            get_user_dropbox_client(refresh_token).files_upload(
+                screenshot_bytes,
+                storage_file_id,
+                mode=dropbox.files.WriteMode.overwrite,
+            )
+        elif provider == "google":
+            access_token = get_google_access_token(refresh_token)
+            root_folder_id = get_or_create_google_folder(access_token, "ArchiveSaver")
+            screenshot_folder_id = get_google_subfolder_id(
+                access_token, root_folder_id, "screenshots"
+            )
+            storage_file_id, _ = upload_to_google_drive(
+                access_token=access_token,
+                folder_id=screenshot_folder_id,
+                filename=filename,
+                file_bytes=screenshot_bytes,
+                content_type="image/png",
+                make_public=False,
+            )
+        else:
+            return jsonify({"error": "지원하지 않는 스토리지입니다."}), 400
+
+        title = app_label if not captured_at else f"{app_label} · {captured_at}"
+        client.table("archives").insert({
+            "id": archive_id,
+            "user_id": user_id,
+            "url": f"screenshot://{quote(source_package, safe='')}",
+            "title": title,
+            "storage_provider": provider,
+            "storage_shared_link": shared_url,
+            "storage_file_id": storage_file_id,
+        }).execute()
+
+        return jsonify({
+            "message": "화면이 저장되었습니다.",
+            "archiveId": archive_id,
+        })
+    except Exception as e:
+        print(f"스크린샷 저장 실패: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/archive/<path:archive_id>/file", methods=["GET"])
+@login_required
+def download_archive_file(archive_id):
+    """현재 사용자 소유의 비공개 스크린샷 원본을 반환합니다."""
+    try:
+        user_id = request.user.get("id")
+        client = get_supabase_admin_client()
+        archive_res = client.table("archives").select("*").eq(
+            "id", archive_id
+        ).eq("user_id", user_id).execute()
+        if not archive_res.data:
+            return jsonify({"error": "아카이브를 찾을 수 없습니다."}), 404
+        archive = archive_res.data[0]
+        if not (archive.get("url") or "").startswith("screenshot://"):
+            return jsonify({"error": "스크린샷 아카이브가 아닙니다."}), 400
+
+        token_res = client.table("user_storage_tokens").select(
+            "encrypted_token"
+        ).eq("user_id", user_id).eq(
+            "provider", archive.get("storage_provider")
+        ).execute()
+        if not token_res.data:
+            return jsonify({"error": "스토리지 연결 정보가 없습니다."}), 400
+        refresh_token = decrypt_token(token_res.data[0].get("encrypted_token"))
+
+        if archive.get("storage_provider") == "dropbox":
+            _, response = get_user_dropbox_client(refresh_token).files_download(
+                archive.get("storage_file_id")
+            )
+            image_bytes = response.content
+        elif archive.get("storage_provider") == "google":
+            image_bytes = download_from_google_drive(
+                get_google_access_token(refresh_token),
+                archive.get("storage_file_id"),
+            )
+        else:
+            return jsonify({"error": "지원하지 않는 스토리지입니다."}), 400
+
+        return Response(
+            image_bytes,
+            content_type="image/png",
+            headers={
+                "Cache-Control": "private, max-age=300",
+                "Content-Disposition": f'inline; filename="{archive_id}.png"',
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
+    except Exception as e:
+        print(f"스크린샷 로드 실패: {archive_id}, {e}")
+        return jsonify({"error": "스크린샷을 불러오지 못했습니다."}), 500
 
 @app.route("/api/collections", methods=["GET"])
 def get_collections():
