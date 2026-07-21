@@ -912,6 +912,82 @@ def log_save_phase(label, started_at):
     elapsed = time.perf_counter() - started_at
     print(f"⏱️ {label}: {elapsed:.2f}s")
 
+
+def storage_connection_success_response(provider):
+    provider_names = {
+        "dropbox": "Dropbox",
+        "google": "Google Drive",
+    }
+    provider_name = provider_names.get(provider, "클라우드 스토리지")
+    app_url = f"com.archivesaver.frontendflutter://storage-connected?provider={quote(provider)}"
+    page = f"""<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="referrer" content="no-referrer">
+    <title>{provider_name} 연동 완료</title>
+    <style>
+      :root {{ color-scheme: dark; }}
+      * {{ box-sizing: border-box; }}
+      body {{
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        padding: 24px;
+        background: #111827;
+        color: #f9fafb;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }}
+      main {{
+        width: min(100%, 420px);
+        padding: 32px 24px;
+        border: 1px solid #374151;
+        border-radius: 16px;
+        background: #1f2937;
+        text-align: center;
+      }}
+      .icon {{ font-size: 52px; }}
+      h1 {{ margin: 16px 0 10px; font-size: 24px; }}
+      p {{ margin: 0; color: #d1d5db; line-height: 1.6; }}
+      .button {{
+        display: block;
+        margin-top: 28px;
+        padding: 14px 18px;
+        border-radius: 10px;
+        background: #0a84ff;
+        color: white;
+        font-weight: 700;
+        text-decoration: none;
+      }}
+      .hint {{ margin-top: 18px; font-size: 13px; color: #9ca3af; }}
+    </style>
+  </head>
+  <body>
+    <main>
+      <div class="icon">✅</div>
+      <h1>{provider_name} 연동 완료</h1>
+      <p>Archive Saver 앱으로 돌아가 연동된 저장 공간을 사용하세요.</p>
+      <a class="button" href="{app_url}">앱으로 돌아가기</a>
+      <p class="hint">앱이 자동으로 열리지 않으면 위 버튼을 눌러주세요.</p>
+    </main>
+    <script>
+      window.setTimeout(function () {{
+        window.location.href = {json.dumps(app_url)};
+      }}, 500);
+    </script>
+  </body>
+</html>"""
+    return Response(
+        page,
+        mimetype="text/html",
+        headers={
+            "Cache-Control": "no-store",
+            "X-Robots-Tag": "noindex, nofollow",
+        },
+    )
+
 # -----------------------------------------------------------------------------
 # OAuth 및 사용자 관리 Endpoints
 # -----------------------------------------------------------------------------
@@ -975,7 +1051,7 @@ def dropbox_callback():
     except Exception as e:
         return f"데이터베이스 저장 실패: {e}", 500
         
-    return "<h3>Dropbox 스토리지 연동이 완료되었습니다!</h3><p>이 창을 닫고 앱으로 돌아가세요.</p>"
+    return storage_connection_success_response("dropbox")
 
 @app.route("/api/auth/google/connect")
 def google_connect():
@@ -1045,7 +1121,7 @@ def google_callback():
     except Exception as e:
         return f"데이터베이스 저장 실패: {e}", 500
         
-    return "<h3>Google Drive 스토리지 연동이 완료되었습니다!</h3><p>이 창을 닫고 앱으로 돌아가세요.</p>"
+    return storage_connection_success_response("google")
 
 @app.route("/api/user/storage-status", methods=["GET"])
 @login_required
