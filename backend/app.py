@@ -1265,7 +1265,6 @@ def upload_media_direct():
 
 
 @app.route("/api/save-html", methods=["POST"])
-@login_required
 def save_html_direct():
     try:
         print("=== /api/save-html 호출됨 ===")
@@ -1273,39 +1272,27 @@ def save_html_direct():
         data = request.json
         url = data.get("url")
         html = data.get("html")
+        collection_id = data.get("collectionId")
+        collection_title = data.get("collectionTitle") or DEFAULT_SHARED_COLLECTION_TITLE
         client_capture_mode = data.get("clientCaptureMode")
         lightweight_capture_mode = client_capture_mode == "android-webview"
 
         if not url:
             return jsonify({"error": "Missing URL"}), 400
 
-        user_id = request.user.get("id")
-        
-        # 유저 스토리지 정보 조회
-        supabase_client = get_supabase_admin_client()
-        res = supabase_client.table("user_storage_tokens").select("provider, encrypted_token").eq("user_id", user_id).execute()
-        tokens = res.data
-        if not tokens:
-            return jsonify({"error": "연동된 클라우드 스토리지가 없습니다. 설정에서 Dropbox 또는 Google Drive를 연결해주세요."}), 400
-            
-        provider = tokens[0].get("provider")
-        encrypted_token = tokens[0].get("encrypted_token")
-        
-        from crypto_utils import decrypt_token
-        refresh_token = decrypt_token(encrypted_token)
-        
-        # storage_config 생성
+        if not collection_id:
+            collection_id = find_collection_id_by_title(collection_title)
+            print(f"ℹ️ 컬렉션 조회 완료: {collection_title} -> {collection_id}")
+
+        if not collection_id:
+            return jsonify({"error": f"'{collection_title}' 컬렉션을 찾지 못했습니다."}), 400
+
+        # 기존 Android 앱은 서버에 설정된 Dropbox 계정으로 저장합니다.
+        provider = "dropbox"
         storage_config = {
             "provider": provider,
-            "refresh_token": refresh_token
+            "dbx_client": get_dropbox_client(),
         }
-        if provider == "dropbox":
-            storage_config["dbx_client"] = get_user_dropbox_client(refresh_token)
-        elif provider == "google":
-            access_token = get_google_access_token(refresh_token)
-            storage_config["access_token"] = access_token
-            root_folder_id = get_or_create_google_folder(access_token, "ArchiveSaver")
-            storage_config["root_folder_id"] = root_folder_id
 
         provided_html = html
         html = provided_html
@@ -1578,21 +1565,39 @@ def save_html_direct():
 
         log_save_phase("스토리지 HTML 업로드", upload_started_at)
 
-        archive_url = f"{get_request_origin()}/archive/{archive_id}"
+        archive_url = get_archive_url(filename)
         title = soup.title.string.strip() if soup.title else "Untitled"
+        domain_tag = parsed.netloc
+        cover_image_url = extract_cover_image(soup, url)
 
-        # Supabase DB에 아카이브 기록 저장
-        archive_data = {
-            "id": archive_id,
-            "user_id": user_id,
-            "url": url,
-            "title": title,
-            "storage_provider": provider,
-            "storage_shared_link": shared_url,
-            "storage_file_id": storage_file_id
+        raindrop_headers = {
+            "Authorization": f"Bearer {RAINDROP_ACCESS_TOKEN}",
+            "Content-Type": "application/json",
         }
-        supabase_client.table("archives").insert(archive_data).execute()
-        
+        payload = {
+            "link": archive_url,
+            "title": title,
+            "excerpt": url,
+            "note": f"Original URL: {url}\nDropbox backup: {shared_url}",
+            "tags": [domain_tag],
+            "collection": {"$id": collection_id},
+        }
+        if cover_image_url:
+            payload["cover"] = cover_image_url
+
+        raindrop_started_at = time.perf_counter()
+        raindrop_response = requests.post(
+            "https://api.raindrop.io/rest/v1/raindrop",
+            headers=raindrop_headers,
+            json=payload,
+            timeout=30,
+        )
+        log_save_phase("Raindrop 저장", raindrop_started_at)
+        if raindrop_response.status_code not in (200, 201):
+            return jsonify({
+                "error": f"Raindrop 저장 실패: {raindrop_response.status_code}"
+            }), 502
+
         log_save_phase("전체 저장 요청 완료", request_started_at)
         return jsonify({
             "message": "저장 완료!",
@@ -1793,42 +1798,11 @@ def manifest():
 @app.route("/archive/<path:archive_id>")
 def view_archive(archive_id):
     try:
-        # 1. DB에서 아카이브 메타데이터 조회
-        client = get_supabase_admin_client()
-        res = client.table("archives").select("*").eq("id", archive_id).execute()
-        archives = res.data
-        if not archives:
-            return Response("Archive not found", status=404, mimetype="text/plain")
-            
-        archive = archives[0]
-        user_id = archive.get("user_id")
-        provider = archive.get("storage_provider")
-        storage_file_id = archive.get("storage_file_id")
-        
-        # 2. 유저 스토리지 토큰 조회 및 복호화
-        token_res = client.table("user_storage_tokens").select("encrypted_token").eq("user_id", user_id).execute()
-        tokens = token_res.data
-        if not tokens:
-            return Response("User storage configuration missing", status=400, mimetype="text/plain")
-            
-        from crypto_utils import decrypt_token
-        refresh_token = decrypt_token(tokens[0].get("encrypted_token"))
-        
-        # 3. 파일 다운로드
-        if provider == "dropbox":
-            dbx = get_user_dropbox_client(refresh_token)
-            # storage_file_id는 dropbox_path에 해당합니다.
-            _, response = dbx.files_download(storage_file_id)
-            html = response.content.decode("utf-8", errors="replace")
-        elif provider == "google":
-            access_token = get_google_access_token(refresh_token)
-            # storage_file_id는 google_file_id에 해당합니다.
-            html_bytes = download_from_google_drive(access_token, storage_file_id)
-            html = html_bytes.decode("utf-8", errors="replace")
-        else:
-            return Response("Unsupported storage provider", status=400, mimetype="text/plain")
-            
-        # 4. 보안 및 미디어 후처리
+        filename = normalize_archive_filename(archive_id)
+        dropbox_path = f"/web-archives/{filename}"
+        _, response = get_dropbox_client().files_download(dropbox_path)
+        html = response.content.decode("utf-8", errors="replace")
+        html = rewrite_archive_media_origin_links(html)
         soup = BeautifulSoup(html, "html.parser")
         add_archive_media_fallbacks(soup)
         html = str(soup)
@@ -1852,6 +1826,8 @@ def view_archive(archive_id):
                 "X-Robots-Tag": "noindex, nofollow"
             }
         )
+    except ValueError as e:
+        return Response(str(e), status=400, mimetype="text/plain")
     except Exception as e:
         print(f"아카이브 로드 실패: {archive_id}, {e}")
         return Response("Archive load failed", status=500, mimetype="text/plain")
