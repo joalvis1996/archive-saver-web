@@ -380,133 +380,30 @@ class SettingsActivity : AppCompatActivity() {
             override fun onNothingSelected(parent: AdapterView<*>?) = Unit
         }
 
-        // 3. 가져오기 시작
+        // 3. 가져오기 시작 (Foreground Service로 백그라운드 & 화면 꺼짐 상태에서도 안전하게 실행)
         startButton.setOnClickListener {
             dialog.dismiss()
-            startBulkImport(currentBookmarks)
-        }
-    }
+            if (currentBookmarks.isEmpty()) return@setOnClickListener
 
-    private fun startBulkImport(bookmarks: List<Any>) {
-        if (bookmarks.isEmpty()) return
-
-        val progressDialogView = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundResource(R.drawable.dialog_background)
-            setPadding(24.dp, 22.dp, 24.dp, 22.dp)
-        }
-
-        val titleView = TextView(this).apply {
-            text = "Raindrop 북마크 오프라인 저장 중"
-            textSize = 17f
-            setTypeface(typeface, android.graphics.Typeface.BOLD)
-            setTextColor(getColor(R.color.text_primary))
-        }
-        progressDialogView.addView(titleView)
-
-        val progressBar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
-            isIndeterminate = false
-            max = bookmarks.size
-            progress = 0
-            progressTintList = android.content.res.ColorStateList.valueOf(getColor(R.color.accent))
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply { topMargin = 16.dp }
-        }
-        progressDialogView.addView(progressBar)
-
-        val progressStatusText = TextView(this).apply {
-            text = "준비 중..."
-            textSize = 13f
-            setTextColor(getColor(R.color.text_secondary))
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply { topMargin = 10.dp }
-        }
-        progressDialogView.addView(progressStatusText)
-
-        val progressDialog = AlertDialog.Builder(this)
-            .setView(progressDialogView)
-            .setCancelable(false)
-            .create()
-
-        progressDialog.window?.setBackgroundDrawableResource(android.R.color.transparent)
-        progressDialog.show()
-
-        executor.execute {
-            var successCount = 0
-            var failCount = 0
-
-            bookmarks.forEachIndexed { index, bmObj ->
-                val (title, link) = if (bmObj is Pair<*, *>) {
-                    bmObj.first.toString() to bmObj.second.toString()
-                } else {
-                    // Reflection or smart cast
-                    val t = bmObj.javaClass.getMethod("getTitle").invoke(bmObj) as String
-                    val l = bmObj.javaClass.getMethod("getLink").invoke(bmObj) as String
-                    t to l
-                }
-
-                mainHandler.post {
-                    progressBar.progress = index + 1
-                    progressStatusText.text = "(${index + 1}/${bookmarks.size}) '$title' 저장 중..."
-                }
-
-                try {
-                    val archiveId = UUID.randomUUID().toString()
-                    val offlineDir = OfflineArchiveStore.prepareDirectory(this@SettingsActivity, archiveId)
-
-                    // 1. 서버에 HTML 아카이브 요청
-                    val saveUrl = "${BuildConfig.ARCHIVE_API_BASE_URL}/api/save-html"
-                    val payload = JSONObject().apply {
-                        put("url", link)
-                        put("title", title)
-                    }
-                    val (code, response) = httpPostJson(saveUrl, payload.toString())
-                    if (code in 200..299) {
-                        val resJson = JSONObject(response)
-                        val archiveUrl = resJson.optString("archiveUrl")
-                        val generatedId = archiveUrl.substringAfterLast("/").removeSuffix(".html").ifBlank { archiveId }
-
-                        // 2. 생성된 HTML을 다운로드하여 로컬 오프라인 사본 생성
-                        val htmlContent = httpGet("${BuildConfig.ARCHIVE_API_BASE_URL}/archive/$generatedId")
-                        val offlineIndex = OfflineArchiveStore.writeIndex(offlineDir, htmlContent)
-
-                        ArchiveHistoryStore.add(
-                            this@SettingsActivity,
-                            ArchiveHistoryStore.Entry(
-                                title = title,
-                                archiveUrl = archiveUrl,
-                                sourceUrl = link,
-                                collectionTitle = "Raindrop",
-                                savedAt = System.currentTimeMillis(),
-                                localArchivePath = offlineIndex.absolutePath,
-                                offlineSizeBytes = OfflineArchiveStore.sizeBytes(offlineIndex.absolutePath)
-                            )
-                        )
-                        successCount++
-                    } else {
-                        offlineDir.deleteRecursively()
-                        failCount++
-                    }
-                } catch (e: Exception) {
-                    failCount++
-                }
-
-                Thread.sleep(150)
+            val array = JSONArray()
+            currentBookmarks.forEach { bm ->
+                array.put(JSONObject().apply {
+                    put("title", bm.title)
+                    put("link", bm.link)
+                })
             }
 
-            mainHandler.post {
-                progressDialog.dismiss()
-                renderHistory()
-                Toast.makeText(
-                    this@SettingsActivity,
-                    "Raindrop 가져오기 완료: 성공 ${successCount}건, 실패 ${failCount}건",
-                    Toast.LENGTH_LONG
-                ).show()
+            val serviceIntent = Intent(this, ArchiveSaveService::class.java).apply {
+                action = ArchiveSaveService.ACTION_BULK_RAINDROP_IMPORT
+                putExtra(ArchiveSaveService.EXTRA_BOOKMARKS_JSON, array.toString())
             }
+            androidx.core.content.ContextCompat.startForegroundService(this, serviceIntent)
+
+            Toast.makeText(
+                this,
+                "백그라운드에서 ${currentBookmarks.size}개 저장을 시작합니다.\n화면을 꺼도 상단바 알림에서 계속 진행됩니다.",
+                Toast.LENGTH_LONG
+            ).show()
         }
     }
 

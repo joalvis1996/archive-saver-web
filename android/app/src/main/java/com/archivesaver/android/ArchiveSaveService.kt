@@ -24,6 +24,7 @@ import java.net.HttpURLConnection
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
 import java.net.URL
+import java.util.UUID
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
@@ -53,6 +54,40 @@ class ArchiveSaveService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == ACTION_BULK_RAINDROP_IMPORT) {
+            val bookmarksJson = intent.getStringExtra(EXTRA_BOOKMARKS_JSON)
+            if (bookmarksJson.isNullOrBlank()) {
+                return START_NOT_STICKY
+            }
+
+            val runningCount = activeJobs.incrementAndGet()
+            if (runningCount == 1) {
+                acquireWakeLock()
+                startForeground(NOTIFICATION_ID, buildNotification("Raindrop 북마크 가져오기를 준비하고 있습니다.", runningCount))
+            } else {
+                updateNotification("Raindrop 가져오기 작업을 추가했습니다.", runningCount)
+            }
+
+            executor.execute {
+                runCatching {
+                    processBulkRaindropImport(bookmarksJson)
+                }.onFailure { error ->
+                    updateNotification(error.toUserFacingNetworkMessage("Raindrop 가져오기"), activeJobs.get())
+                }
+
+                val remaining = activeJobs.decrementAndGet()
+                if (remaining <= 0) {
+                    releaseWakeLock()
+                    stopForeground(STOP_FOREGROUND_DETACH)
+                    stopSelf()
+                } else {
+                    updateNotification("저장 작업을 계속 진행 중입니다.", remaining)
+                }
+            }
+
+            return START_REDELIVER_INTENT
+        }
+
         if (intent?.action != ACTION_ENQUEUE_SAVE) {
             return START_NOT_STICKY
         }
@@ -587,6 +622,122 @@ class ArchiveSaveService : Service() {
             )
             .build()
 
+    private fun processBulkRaindropImport(bookmarksJson: String) {
+        val array = JSONArray(bookmarksJson)
+        val total = array.length()
+        var successCount = 0
+        var failCount = 0
+
+        for (i in 0 until total) {
+            val item = array.optJSONObject(i) ?: continue
+            val title = item.optString("title", "제목 없음")
+            val link = item.optString("link", "")
+            if (link.isBlank()) continue
+
+            updateNotificationWithProgress(
+                "Raindrop 저장 중 (${i + 1}/$total): $title",
+                i + 1,
+                total
+            )
+
+            val archiveId = UUID.randomUUID().toString()
+            val offlineDir = OfflineArchiveStore.prepareDirectory(this, archiveId)
+
+            try {
+                // 1. 서버에 HTML 아카이브 생성 요청
+                val saveUrl = "${BuildConfig.ARCHIVE_API_BASE_URL}/api/save-html"
+                val payload = JSONObject().apply {
+                    put("url", link)
+                    put("title", title)
+                }
+                val (code, response) = httpPostJson(saveUrl, payload.toString())
+                if (code in 200..299) {
+                    val resJson = JSONObject(response)
+                    val archiveUrl = resJson.optString("archiveUrl")
+                    val generatedId = archiveUrl.substringAfterLast("/").removeSuffix(".html").ifBlank { archiveId }
+
+                    // 2. 생성된 HTML을 다운로드하여 로컬 오프라인 사본 생성
+                    val htmlContent = httpGet("${BuildConfig.ARCHIVE_API_BASE_URL}/archive/$generatedId")
+                    val offlineIndex = OfflineArchiveStore.writeIndex(offlineDir, htmlContent)
+
+                    ArchiveHistoryStore.add(
+                        this,
+                        ArchiveHistoryStore.Entry(
+                            title = title,
+                            archiveUrl = archiveUrl,
+                            sourceUrl = link,
+                            collectionTitle = "Raindrop",
+                            savedAt = System.currentTimeMillis(),
+                            localArchivePath = offlineIndex.absolutePath,
+                            offlineSizeBytes = OfflineArchiveStore.sizeBytes(offlineIndex.absolutePath)
+                        )
+                    )
+                    successCount++
+                } else {
+                    offlineDir.deleteRecursively()
+                    failCount++
+                }
+            } catch (e: Throwable) {
+                offlineDir.deleteRecursively()
+                failCount++
+            }
+
+            Thread.sleep(150)
+        }
+
+        updateNotification("Raindrop 북마크 ${successCount}개 저장 완료 (실패 ${failCount}개)", 0)
+    }
+
+    private fun updateNotificationWithProgress(message: String, progress: Int, max: Int) {
+        val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        val notif = NotificationCompat.Builder(this, CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_archive_24)
+            .setContentTitle("Archive Saver (오프라인 저장 중)")
+            .setContentText(message)
+            .setProgress(max, progress, false)
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setContentIntent(
+                PendingIntent.getActivity(
+                    this,
+                    0,
+                    Intent(this, SettingsActivity::class.java),
+                    PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+                )
+            )
+            .build()
+        manager.notify(NOTIFICATION_ID, notif)
+    }
+
+    private fun httpGet(urlStr: String): String {
+        val url = URL(urlStr)
+        val conn = url.openConnection() as HttpURLConnection
+        conn.connectTimeout = 20000
+        conn.readTimeout = 30000
+        conn.setRequestProperty("Bypass-Tunnel-Reminder", "true")
+        return conn.inputStream.bufferedReader().use { it.readText() }
+    }
+
+    private fun httpPostJson(urlStr: String, json: String): Pair<Int, String> {
+        val url = URL(urlStr)
+        val conn = url.openConnection() as HttpURLConnection
+        conn.requestMethod = "POST"
+        conn.connectTimeout = 20000
+        conn.readTimeout = 40000
+        conn.doOutput = true
+        conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8")
+        conn.setRequestProperty("Bypass-Tunnel-Reminder", "true")
+
+        conn.outputStream.use { os ->
+            OutputStreamWriter(os, Charsets.UTF_8).use { it.write(json) }
+        }
+
+        val code = conn.responseCode
+        val stream = if (code in 200..299) conn.inputStream else (conn.errorStream ?: conn.inputStream)
+        val text = stream.bufferedReader().use { it.readText() }
+        return code to text
+    }
+
     private fun acquireWakeLock() {
         if (wakeLock?.isHeld == true) {
             return
@@ -597,7 +748,7 @@ class ArchiveSaveService : Service() {
             PowerManager.PARTIAL_WAKE_LOCK,
             "ArchiveSaver::SaveWakeLock"
         ).apply {
-            acquire(30 * 60 * 1000L)
+            acquire(60 * 60 * 1000L)
         }
     }
 
@@ -608,7 +759,9 @@ class ArchiveSaveService : Service() {
 
     companion object {
         const val ACTION_ENQUEUE_SAVE = "com.archivesaver.android.action.ENQUEUE_SAVE"
+        const val ACTION_BULK_RAINDROP_IMPORT = "com.archivesaver.android.action.BULK_RAINDROP_IMPORT"
         const val EXTRA_JOB_FILE_PATH = "com.archivesaver.android.extra.JOB_FILE_PATH"
+        const val EXTRA_BOOKMARKS_JSON = "com.archivesaver.android.extra.BOOKMARKS_JSON"
 
         private const val CHANNEL_ID = "archive_save_jobs"
         private const val NOTIFICATION_ID = 7401
