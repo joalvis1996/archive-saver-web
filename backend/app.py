@@ -1751,34 +1751,60 @@ def get_collections():
 
 @app.route("/api/raindrop/bookmarks", methods=["GET"])
 def get_raindrop_bookmarks():
-    """Raindrop 컬렉션 내 북마크 목록을 조회합니다."""
+    """Raindrop 컬렉션 내 북마크 목록을 조회합니다 (다중 페이지 및 수량 제한 지원)."""
     try:
         collection_id = request.args.get("collectionId", "0")
-        page = request.args.get("page", "0")
-        perpage = request.args.get("perpage", "50")
+        page_param = int(request.args.get("page", "0"))
+        limit_param = request.args.get("limit")  # e.g. "50", "100", "200", "500", "all"
 
         headers = {"Authorization": f"Bearer {RAINDROP_ACCESS_TOKEN}"}
-        url = f"https://api.raindrop.io/rest/v1/raindrops/{collection_id}?page={page}&perpage={perpage}&sort=-created"
-        res = requests.get(url, headers=headers, timeout=20)
-        res.raise_for_status()
-        data = res.json()
 
-        items = []
-        for item in data.get("items", []):
-            items.append({
-                "id": item.get("_id"),
-                "title": item.get("title") or "제목 없음",
-                "link": item.get("link") or "",
-                "excerpt": item.get("excerpt") or "",
-                "cover": item.get("cover") or "",
-                "domain": item.get("domain") or "",
-                "created": item.get("created") or "",
-            })
+        target_limit = None
+        if limit_param == "all" or limit_param == "0":
+            target_limit = 2000
+        elif limit_param and limit_param.isdigit():
+            target_limit = int(limit_param)
+        else:
+            target_limit = 50
+
+        all_items = []
+        current_page = page_param
+        total_count = 0
+
+        while True:
+            url = f"https://api.raindrop.io/rest/v1/raindrops/{collection_id}?page={current_page}&perpage=50&sort=-created"
+            res = requests.get(url, headers=headers, timeout=20)
+            res.raise_for_status()
+            data = res.json()
+            total_count = data.get("count", 0)
+            raw_items = data.get("items", [])
+            if not raw_items:
+                break
+
+            for item in raw_items:
+                all_items.append({
+                    "id": item.get("_id"),
+                    "title": item.get("title") or "제목 없음",
+                    "link": item.get("link") or "",
+                    "excerpt": item.get("excerpt") or "",
+                    "cover": item.get("cover") or "",
+                    "domain": item.get("domain") or "",
+                    "created": item.get("created") or "",
+                })
+                if target_limit and len(all_items) >= target_limit:
+                    break
+
+            if target_limit is not None and len(all_items) >= target_limit:
+                break
+            if len(all_items) >= total_count:
+                break
+            current_page += 1
 
         return jsonify({
-            "items": items,
-            "count": data.get("count", len(items)),
-            "page": int(page),
+            "items": all_items,
+            "count": total_count,
+            "returned": len(all_items),
+            "page": page_param,
         })
     except Exception as e:
         print(f"Raindrop 북마크 조회 실패: {e}")

@@ -213,76 +213,130 @@ class SettingsActivity : AppCompatActivity() {
     }
 
     private fun showRaindropImportDialog() {
-        val dialogView = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(24.dp, 20.dp, 24.dp, 20.dp)
-        }
-
-        val titleView = TextView(this).apply {
-            text = getString(R.string.raindrop_import_section_title)
-            textSize = 18f
-            setTypeface(typeface, android.graphics.Typeface.BOLD)
-            setTextColor(getColor(R.color.text_primary))
-        }
-        dialogView.addView(titleView)
-
-        val spinner = Spinner(this).apply {
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                48.dp
-            ).apply { topMargin = 14.dp }
-        }
-        dialogView.addView(spinner)
-
-        val statusTextView = TextView(this).apply {
-            text = "컬렉션 및 북마크 목록 조회 중..."
-            setTextColor(getColor(R.color.text_secondary))
-            textSize = 13f
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply { topMargin = 12.dp }
-        }
-        dialogView.addView(statusTextView)
-
-        val bookmarkListContainer = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                180.dp
-            ).apply { topMargin = 10.dp }
-        }
-        val scrollView = androidx.core.widget.NestedScrollView(this).apply {
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                180.dp
-            )
-            addView(bookmarkListContainer)
-        }
-        dialogView.addView(scrollView)
-
+        val dialogView = layoutInflater.inflate(R.layout.dialog_raindrop_import, null)
         val dialog = AlertDialog.Builder(this)
             .setView(dialogView)
-            .setPositiveButton("가져오기 및 오프라인 저장", null)
-            .setNegativeButton("취소", null)
+            .setCancelable(true)
             .create()
 
+        // 배경을 투명하게 만들어 둥근 모서리 drawable이 깨끗하게 보이도록 설정
+        dialog.window?.setBackgroundDrawableResource(android.R.color.transparent)
         dialog.show()
 
-        val positiveButton = dialog.getButton(AlertDialog.BUTTON_POSITIVE)
-        positiveButton.isEnabled = false
+        val closeButton = dialogView.findViewById<ImageView>(R.id.dialogCloseButton)
+        val collectionSpinner = dialogView.findViewById<Spinner>(R.id.collectionSpinner)
+        val limitSpinner = dialogView.findViewById<Spinner>(R.id.limitSpinner)
+        val statusTextView = dialogView.findViewById<TextView>(R.id.dialogStatusText)
+        val bookmarkListContainer = dialogView.findViewById<LinearLayout>(R.id.dialogBookmarkListContainer)
+        val cancelButton = dialogView.findViewById<MaterialButton>(R.id.dialogCancelButton)
+        val startButton = dialogView.findViewById<MaterialButton>(R.id.dialogStartButton)
+
+        closeButton.setOnClickListener { dialog.dismiss() }
+        cancelButton.setOnClickListener { dialog.dismiss() }
+        startButton.isEnabled = false
 
         data class BookmarkItem(val title: String, val link: String)
         val collectionsList = mutableListOf<Pair<String, Long>>()
         val currentBookmarks = mutableListOf<BookmarkItem>()
 
-        // 1. 컬렉션 조회
+        val limitOptions = listOf(
+            "최근 50개" to "50",
+            "최근 100개" to "100",
+            "최근 200개" to "200",
+            "최근 500개" to "500",
+            "전체 북마크 (All)" to "all"
+        )
+        val limitAdapter = ArrayAdapter(
+            this,
+            android.R.layout.simple_spinner_dropdown_item,
+            limitOptions.map { it.first }
+        )
+        limitSpinner.adapter = limitAdapter
+
+        fun loadBookmarksForSelection() {
+            val selectedCol = collectionsList.getOrNull(collectionSpinner.selectedItemPosition) ?: return
+            val selectedLimit = limitOptions.getOrNull(limitSpinner.selectedItemPosition)?.second ?: "50"
+            val collectionId = selectedCol.second
+
+            statusTextView.text = "'${selectedCol.first}' 북마크 불러오는 중..."
+            bookmarkListContainer.removeAllViews()
+            startButton.isEnabled = false
+
+            executor.execute {
+                try {
+                    val bookmarksUrl = "${BuildConfig.ARCHIVE_API_BASE_URL}/api/raindrop/bookmarks?collectionId=$collectionId&limit=$selectedLimit"
+                    val response = httpGet(bookmarksUrl)
+                    if (response.trim().startsWith("<")) {
+                        throw IllegalStateException("백엔드 서버에 /api/raindrop/bookmarks 배포가 필요합니다.")
+                    }
+                    val resObj = JSONObject(response)
+                    val itemsArray = resObj.optJSONArray("items") ?: JSONArray()
+                    val totalCount = resObj.optInt("count", itemsArray.length())
+                    currentBookmarks.clear()
+                    for (i in 0 until itemsArray.length()) {
+                        val item = itemsArray.optJSONObject(i) ?: continue
+                        val title = item.optString("title", "제목 없음")
+                        val link = item.optString("link", "")
+                        if (link.startsWith("http://") || link.startsWith("https://")) {
+                            currentBookmarks.add(BookmarkItem(title, link))
+                        }
+                    }
+
+                    mainHandler.post {
+                        statusTextView.text = "가져올 대상: 총 ${totalCount}개 중 ${currentBookmarks.size}개 준비됨"
+                        bookmarkListContainer.removeAllViews()
+
+                        currentBookmarks.forEachIndexed { idx, bm ->
+                            val rowLayout = LinearLayout(this@SettingsActivity).apply {
+                                orientation = LinearLayout.VERTICAL
+                                setPadding(8.dp, 8.dp, 8.dp, 8.dp)
+                            }
+                            val titleText = TextView(this@SettingsActivity).apply {
+                                text = "${idx + 1}. ${bm.title}"
+                                textSize = 13f
+                                setTypeface(typeface, android.graphics.Typeface.BOLD)
+                                setTextColor(getColor(R.color.text_primary))
+                                maxLines = 1
+                            }
+                            val linkText = TextView(this@SettingsActivity).apply {
+                                text = bm.link
+                                textSize = 11f
+                                setTextColor(getColor(R.color.text_secondary))
+                                maxLines = 1
+                            }
+                            rowLayout.addView(titleText)
+                            rowLayout.addView(linkText)
+                            bookmarkListContainer.addView(rowLayout)
+
+                            if (idx < currentBookmarks.size - 1) {
+                                bookmarkListContainer.addView(View(this@SettingsActivity).apply {
+                                    setBackgroundColor(getColor(R.color.border_subtle))
+                                    layoutParams = LinearLayout.LayoutParams(
+                                        LinearLayout.LayoutParams.MATCH_PARENT,
+                                        1.dp
+                                    )
+                                })
+                            }
+                        }
+
+                        startButton.text = "${currentBookmarks.size}개 오프라인 저장 시작"
+                        startButton.isEnabled = currentBookmarks.isNotEmpty()
+                    }
+                } catch (e: Exception) {
+                    mainHandler.post {
+                        statusTextView.text = "북마크 조회 실패: ${e.message}"
+                    }
+                }
+            }
+        }
+
+        // 1. 컬렉션 목록 조회
         executor.execute {
             try {
                 val collectionsUrl = "${BuildConfig.ARCHIVE_API_BASE_URL}/api/collections"
                 val response = httpGet(collectionsUrl)
                 if (response.trim().startsWith("<")) {
-                    throw IllegalStateException("서버가 최신 버전으로 배포되지 않았거나 HTML을 반환했습니다.")
+                    throw IllegalStateException("서버 응답 오류")
                 }
                 val jsonArray = JSONArray(response)
                 collectionsList.clear()
@@ -292,7 +346,8 @@ class SettingsActivity : AppCompatActivity() {
                     val item = jsonArray.optJSONObject(i) ?: continue
                     val title = item.optString("title", "컬렉션")
                     val id = item.optLong("_id", 0L)
-                    collectionsList.add(title to id)
+                    val count = item.optInt("count", 0)
+                    collectionsList.add("$title ($count)" to id)
                 }
 
                 mainHandler.post {
@@ -301,7 +356,7 @@ class SettingsActivity : AppCompatActivity() {
                         android.R.layout.simple_spinner_dropdown_item,
                         collectionsList.map { it.first }
                     )
-                    spinner.adapter = adapter
+                    collectionSpinner.adapter = adapter
                 }
             } catch (e: Exception) {
                 mainHandler.post {
@@ -310,62 +365,23 @@ class SettingsActivity : AppCompatActivity() {
             }
         }
 
-        // 2. 스피너 선택 시 북마크 목록 조회
-        spinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+        // 2. 컬렉션 또는 수량 변경 시 북마크 목록 자동 로드
+        collectionSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
-                val selected = collectionsList.getOrNull(position) ?: return
-                val collectionId = selected.second
-                statusTextView.text = "'${selected.first}' 북마크 불러오는 중..."
-                bookmarkListContainer.removeAllViews()
-                positiveButton.isEnabled = false
-
-                executor.execute {
-                    try {
-                        val bookmarksUrl = "${BuildConfig.ARCHIVE_API_BASE_URL}/api/raindrop/bookmarks?collectionId=$collectionId&perpage=50"
-                        val response = httpGet(bookmarksUrl)
-                        if (response.trim().startsWith("<")) {
-                            throw IllegalStateException("백엔드 서버에 /api/raindrop/bookmarks 배포가 필요합니다.")
-                        }
-                        val resObj = JSONObject(response)
-                        val itemsArray = resObj.optJSONArray("items") ?: JSONArray()
-                        currentBookmarks.clear()
-                        for (i in 0 until itemsArray.length()) {
-                            val item = itemsArray.optJSONObject(i) ?: continue
-                            val title = item.optString("title", "제목 없음")
-                            val link = item.optString("link", "")
-                            if (link.startsWith("http://") || link.startsWith("https://")) {
-                                currentBookmarks.add(BookmarkItem(title, link))
-                            }
-                        }
-
-                        mainHandler.post {
-                            statusTextView.text = "가져올 북마크: ${currentBookmarks.size}개"
-                            bookmarkListContainer.removeAllViews()
-                            currentBookmarks.forEach { bm ->
-                                val row = TextView(this@SettingsActivity).apply {
-                                    text = "• ${bm.title}\n   ${bm.link}"
-                                    textSize = 12f
-                                    setTextColor(getColor(R.color.text_primary))
-                                    setPadding(4.dp, 4.dp, 4.dp, 4.dp)
-                                    maxLines = 2
-                                }
-                                bookmarkListContainer.addView(row)
-                            }
-                            positiveButton.isEnabled = currentBookmarks.isNotEmpty()
-                        }
-                    } catch (e: Exception) {
-                        mainHandler.post {
-                            statusTextView.text = "북마크 조회 실패: ${e.message}"
-                        }
-                    }
-                }
+                loadBookmarksForSelection()
             }
-
             override fun onNothingSelected(parent: AdapterView<*>?) = Unit
         }
 
-        // 3. 가져오기 시작 버튼
-        positiveButton.setOnClickListener {
+        limitSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                loadBookmarksForSelection()
+            }
+            override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+        }
+
+        // 3. 가져오기 시작
+        startButton.setOnClickListener {
             dialog.dismiss()
             startBulkImport(currentBookmarks)
         }
@@ -376,11 +392,12 @@ class SettingsActivity : AppCompatActivity() {
 
         val progressDialogView = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(24.dp, 20.dp, 24.dp, 20.dp)
+            setBackgroundResource(R.drawable.dialog_background)
+            setPadding(24.dp, 22.dp, 24.dp, 22.dp)
         }
 
         val titleView = TextView(this).apply {
-            text = "Raindrop 북마크 가져오는 중"
+            text = "Raindrop 북마크 오프라인 저장 중"
             textSize = 17f
             setTypeface(typeface, android.graphics.Typeface.BOLD)
             setTextColor(getColor(R.color.text_primary))
@@ -391,6 +408,7 @@ class SettingsActivity : AppCompatActivity() {
             isIndeterminate = false
             max = bookmarks.size
             progress = 0
+            progressTintList = android.content.res.ColorStateList.valueOf(getColor(R.color.accent))
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
@@ -405,7 +423,7 @@ class SettingsActivity : AppCompatActivity() {
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply { topMargin = 8.dp }
+            ).apply { topMargin = 10.dp }
         }
         progressDialogView.addView(progressStatusText)
 
@@ -414,6 +432,7 @@ class SettingsActivity : AppCompatActivity() {
             .setCancelable(false)
             .create()
 
+        progressDialog.window?.setBackgroundDrawableResource(android.R.color.transparent)
         progressDialog.show()
 
         executor.execute {
