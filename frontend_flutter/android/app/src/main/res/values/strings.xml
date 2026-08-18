@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Archive Saver</string>
+    <string name="screen_capture_accessibility_description">볼륨 아래 버튼을 두 번 눌렀을 때 현재 화면을 사용자의 아카이브에 저장합니다.</string>
+</resources>

@@ -10,7 +10,9 @@ object ArchiveHistoryStore {
         val archiveUrl: String,
         val sourceUrl: String,
         val collectionTitle: String,
-        val savedAt: Long
+        val savedAt: Long,
+        val localArchivePath: String = "",
+        val offlineSizeBytes: Long = 0
     )
 
     private const val PREFS_NAME = "archive_history"
@@ -35,7 +37,9 @@ object ArchiveHistoryStore {
                             archiveUrl = item.optString("archiveUrl"),
                             sourceUrl = item.optString("sourceUrl"),
                             collectionTitle = item.optString("collectionTitle"),
-                            savedAt = item.optLong("savedAt")
+                            savedAt = item.optLong("savedAt"),
+                            localArchivePath = item.optString("localArchivePath"),
+                            offlineSizeBytes = item.optLong("offlineSizeBytes")
                         )
                     )
                 }
@@ -53,6 +57,8 @@ object ArchiveHistoryStore {
                     put("sourceUrl", entry.sourceUrl)
                     put("collectionTitle", entry.collectionTitle)
                     put("savedAt", entry.savedAt)
+                    put("localArchivePath", entry.localArchivePath)
+                    put("offlineSizeBytes", entry.offlineSizeBytes)
                 }
             )
         }

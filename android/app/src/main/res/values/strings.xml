@@ -34,6 +34,12 @@
     <string name="step_capture">캡처</string>
     <string name="step_upload">업로드</string>
     <string name="step_archive">저장</string>
+    <string name="collapse">접기</string>
+    <string name="raindrop_import_section_title">Raindrop 북마크 가져오기</string>
+    <string name="raindrop_import_description">Raindrop에 저장된 북마크를 가져와 기기에 오프라인으로 저장합니다.</string>
+    <string name="raindrop_import_button">Raindrop에서 북마크 가져오기</string>
+    <string name="importing">가져오는 중...</string>
+    <string name="import_completed">Raindrop 북마크 가져오기 및 오프라인 저장이 완료되었습니다.</string>
     <string-array name="collection_options">
         <item>축구</item>
         <item>야구</item>

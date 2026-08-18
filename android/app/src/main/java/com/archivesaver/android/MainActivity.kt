@@ -739,8 +739,11 @@ class MainActivity : AppCompatActivity() {
     private inner class ArchiveSaverBridge {
         @JavascriptInterface
         fun onCaptureStarted() {
-            mainHandler.post {
+            synchronized(htmlCaptureBuffer) {
                 htmlCaptureBuffer.setLength(0)
+            }
+
+            mainHandler.post {
                 updateStatus("캡처한 HTML을 조립하는 중...")
                 binding.progressBar.progress = 60
             }
@@ -887,7 +890,7 @@ class MainActivity : AppCompatActivity() {
         val connection = (URL(candidate.sourceUrl).openConnection() as HttpURLConnection).apply {
             requestMethod = "GET"
             connectTimeout = 30_000
-            readTimeout = 120_000
+            readTimeout = 600_000
             instanceFollowRedirects = true
             setRequestProperty("Referer", refererUrl)
             setRequestProperty(
@@ -917,22 +920,63 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun uploadMediaFile(file: File, candidate: MediaCandidate): String {
-        val boundary = "----ArchiveSaver${System.currentTimeMillis()}"
-        val endpoint = URL("${BuildConfig.ARCHIVE_API_BASE_URL}/api/upload-media")
-        val connection = (endpoint.openConnection() as HttpURLConnection).apply {
+        val uploadInfo = requestMediaUploadLink(file, candidate)
+        val uploadUrl = uploadInfo.getString("uploadUrl")
+        val archiveUrl = uploadInfo.getString("url")
+        val connection = (URL(uploadUrl).openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
             connectTimeout = 30_000
-            readTimeout = 120_000
+            readTimeout = 600_000
             doOutput = true
-            setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
-            setRequestProperty("Accept", "application/json")
+            setFixedLengthStreamingMode(file.length())
+            setRequestProperty("Content-Type", "application/octet-stream")
         }
 
         connection.outputStream.use { output ->
-            writeFormField(output, boundary, "mediaType", candidate.mediaType)
-            writeFormField(output, boundary, "sourceUrl", candidate.sourceUrl)
-            writeFilePart(output, boundary, "file", file, guessContentType(file, candidate.mediaType))
-            output.write("--$boundary--\r\n".toByteArray())
+            file.inputStream().use { input ->
+                input.copyTo(output)
+            }
+        }
+
+        val responseCode = connection.responseCode
+        if (responseCode !in 200..299) {
+            val responseText = connection.errorStream
+                ?.bufferedReader()
+                ?.use(BufferedReader::readText)
+                .orEmpty()
+            throw IllegalStateException(
+                responseText.takeIf { it.isNotBlank() }
+                    ?: "Dropbox 직접 업로드 실패: HTTP $responseCode"
+            )
+        }
+
+        return if (archiveUrl.startsWith("/")) {
+            "${BuildConfig.ARCHIVE_API_BASE_URL}$archiveUrl"
+        } else {
+            archiveUrl
+        }
+    }
+
+    private fun requestMediaUploadLink(file: File, candidate: MediaCandidate): JSONObject {
+        val endpoint = URL("${BuildConfig.ARCHIVE_API_BASE_URL}/api/media-upload-link")
+        val body = JSONObject().apply {
+            put("mediaType", candidate.mediaType)
+            put("sourceUrl", candidate.sourceUrl)
+            put("filename", file.name)
+            put("contentType", guessContentType(file, candidate.mediaType))
+        }
+
+        val connection = (endpoint.openConnection() as HttpURLConnection).apply {
+            requestMethod = "POST"
+            connectTimeout = 30_000
+            readTimeout = 600_000
+            doOutput = true
+            setRequestProperty("Content-Type", "application/json; charset=utf-8")
+            setRequestProperty("Accept", "application/json")
+        }
+
+        OutputStreamWriter(connection.outputStream, Charsets.UTF_8).use { writer ->
+            writer.write(body.toString())
         }
 
         val responseCode = connection.responseCode
@@ -943,18 +987,11 @@ class MainActivity : AppCompatActivity() {
 
         if (responseCode !in 200..299) {
             throw IllegalStateException(
-                responseJson?.optString("error") ?: "미디어 업로드 실패: HTTP $responseCode"
+                responseJson?.optString("error") ?: "미디어 업로드 링크 생성 실패: HTTP $responseCode"
             )
         }
 
-        val uploadedUrl = responseJson?.optString("url")?.takeIf { it.isNotBlank() }
-            ?: throw IllegalStateException("업로드 응답에 URL이 없습니다.")
-
-        return if (uploadedUrl.startsWith("/")) {
-            "${BuildConfig.ARCHIVE_API_BASE_URL}$uploadedUrl"
-        } else {
-            uploadedUrl
-        }
+        return responseJson ?: throw IllegalStateException("업로드 링크 응답이 비어 있습니다.")
     }
 
     private fun writeFormField(output: OutputStream, boundary: String, name: String, value: String) {
@@ -1161,7 +1198,7 @@ class MainActivity : AppCompatActivity() {
             (function() {
               try {
                 const html = '<!DOCTYPE html>\n' + document.documentElement.outerHTML;
-                const chunkSize = 180000;
+                const chunkSize = 50000;
                 if (!window.ArchiveSaverBridge) {
                   return false;
                 }

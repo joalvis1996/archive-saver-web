@@ -1738,14 +1738,50 @@ def download_archive_file(archive_id):
         print(f"스크린샷 로드 실패: {archive_id}, {e}")
         return jsonify({"error": "스크린샷을 불러오지 못했습니다."}), 500
 
+@app.route("/api/raindrop/collections", methods=["GET"])
 @app.route("/api/collections", methods=["GET"])
 def get_collections():
     try:
         headers = {"Authorization": f"Bearer {RAINDROP_ACCESS_TOKEN}"}
-        res = requests.get("https://api.raindrop.io/rest/v1/collections", headers=headers)
+        res = requests.get("https://api.raindrop.io/rest/v1/collections", headers=headers, timeout=15)
         res.raise_for_status()
         return jsonify(res.json().get("items", []))
     except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/raindrop/bookmarks", methods=["GET"])
+def get_raindrop_bookmarks():
+    """Raindrop 컬렉션 내 북마크 목록을 조회합니다."""
+    try:
+        collection_id = request.args.get("collectionId", "0")
+        page = request.args.get("page", "0")
+        perpage = request.args.get("perpage", "50")
+
+        headers = {"Authorization": f"Bearer {RAINDROP_ACCESS_TOKEN}"}
+        url = f"https://api.raindrop.io/rest/v1/raindrops/{collection_id}?page={page}&perpage={perpage}&sort=-created"
+        res = requests.get(url, headers=headers, timeout=20)
+        res.raise_for_status()
+        data = res.json()
+
+        items = []
+        for item in data.get("items", []):
+            items.append({
+                "id": item.get("_id"),
+                "title": item.get("title") or "제목 없음",
+                "link": item.get("link") or "",
+                "excerpt": item.get("excerpt") or "",
+                "cover": item.get("cover") or "",
+                "domain": item.get("domain") or "",
+                "created": item.get("created") or "",
+            })
+
+        return jsonify({
+            "items": items,
+            "count": data.get("count", len(items)),
+            "page": int(page),
+        })
+    except Exception as e:
+        print(f"Raindrop 북마크 조회 실패: {e}")
         return jsonify({"error": str(e)}), 500
 
 @app.route("/manifest.webmanifest")
